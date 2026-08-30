@@ -131,16 +131,19 @@ def test_protobuf_duration_strings_are_parsed():
     assert transform.parse_duration_seconds(None) is None
 
 
-def test_lean_floor_breach_fires_below_67kg():
+def test_lean_floor_breach_fires_below_the_floor():
     """The one rule that overrides everything else in the campaign."""
     rows = [_daily(date="2026-11-02", weight_kg=80.0, body_fat_pct=17.0,
-                   lean_kg=66.4, campaign_week=11)]
+                   lean_kg=campaign.LEAN_FLOOR_KG - 0.6, campaign_week=11)]
     assert transform.build_weekly(rows, [])[0]["lean_floor_breach"] is True
 
 
-def test_lean_floor_not_breached_above_67kg():
+def test_lean_floor_not_breached_above_the_floor():
+    """Derived from campaign.LEAN_FLOOR_KG, not hard-coded: the real floor lives
+    in the gitignored campaign.toml, so a literal here fails on a fresh clone
+    that only has campaign.example.toml."""
     rows = [_daily(date="2026-11-02", weight_kg=80.0, body_fat_pct=15.0,
-                   lean_kg=68.0, campaign_week=11)]
+                   lean_kg=campaign.LEAN_FLOOR_KG + 1.0, campaign_week=11)]
     assert transform.build_weekly(rows, [])[0]["lean_floor_breach"] is False
 
 
@@ -170,11 +173,14 @@ def test_maintenance_weeks_match_the_plan():
     assert campaign.MAINTENANCE_WEEKS == {4, 5, 14, 18}
 
 
-def test_benchmarks_land_on_the_documented_weeks():
-    expected = {"B0": 1, "B1": 4, "B2": 7, "B3": 11, "B4": 16}
-    actual = {label: campaign.week_number(d)
-              for d, label in campaign.BENCHMARKS.items()}
-    assert actual == expected
+def test_every_benchmark_falls_inside_the_campaign_and_on_a_distinct_week():
+    """Property, not literals: a benchmark dated outside the campaign silently
+    never appears in metrics_weekly.csv, and two benchmarks in one week means
+    one of them is overwritten by the other (build_weekly keeps the last)."""
+    weeks = {label: campaign.week_number(d)
+             for d, label in campaign.BENCHMARKS.items()}
+    assert all(w is not None for w in weeks.values()), weeks
+    assert len(set(weeks.values())) == len(weeks), weeks
 
 
 def test_datatype_path_derivation_matches_verified_api_paths():
@@ -256,10 +262,16 @@ def test_anchor_slots_are_ordered_within_the_week_not_by_weekday():
     """The gym follows the office, not the calendar — Mon/Thu shift week to
     week, so order within the campaign week is the reliable signal."""
     from coach_sync import hevy
+    from datetime import timedelta
+    w1 = campaign.week_bounds(1)[0]
+    w2 = campaign.week_bounds(2)[0]
     sessions = [
-        {"date": "2026-08-25", "start_time": "18:00", "workout_id": "b", "title": ""},
-        {"date": "2026-08-24", "start_time": "17:30", "workout_id": "a", "title": ""},
-        {"date": "2026-09-01", "start_time": "17:30", "workout_id": "c", "title": ""},
+        {"date": (w1 + timedelta(days=1)).isoformat(), "start_time": "18:00",
+         "workout_id": "b", "title": ""},
+        {"date": w1.isoformat(), "start_time": "17:30",
+         "workout_id": "a", "title": ""},
+        {"date": w2.isoformat(), "start_time": "17:30",
+         "workout_id": "c", "title": ""},
     ]
     labels = hevy.label_anchor_slots(sorted(sessions, key=lambda s: s["date"]))
     assert labels["a"] == "A1"   # first of W1
