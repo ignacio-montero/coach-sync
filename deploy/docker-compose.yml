@@ -24,7 +24,7 @@
 #    applies to getUpdates, which this service never calls.
 services:
   coach-sync:
-    image: ghcr.io/ignacio-montero/coach-sync:0.2.0   # pin a version; never :latest
+    image: ghcr.io/ignacio-montero/coach-sync:0.2.1   # pin a version; never :latest
     container_name: coach-sync
     restart: unless-stopped
     init: true                 # PID 1 that reaps the fetch/build child processes
