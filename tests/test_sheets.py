@@ -102,9 +102,19 @@ def test_scope_is_drive_file_not_spreadsheets():
     """drive.file reaches only files this app created. `spreadsheets` would
     reach every spreadsheet in the account."""
     assert sheets.SCOPE.endswith("/drive.file")
-    from coach_sync.datatypes import ALL_SCOPES
-    assert sheets.SCOPE in ALL_SCOPES
-    assert not any(s.endswith("/spreadsheets") for s in ALL_SCOPES)
+    from coach_sync.datatypes import SHEETS_SCOPES
+    assert sheets.SCOPE in SHEETS_SCOPES
+    assert not any(s.endswith("/spreadsheets") for s in SHEETS_SCOPES)
+
+
+def test_health_and_drive_scopes_never_share_a_token():
+    """Google Health returns 403 DISALLOWED_OAUTH_SCOPES for any token that
+    also carries a Drive scope. Verified against the live API 2026-08-30 —
+    this is a hard platform constraint, not a preference."""
+    from coach_sync.datatypes import HEALTH_SCOPES, SHEETS_SCOPES, ALL_SCOPES
+    assert not set(HEALTH_SCOPES) & set(SHEETS_SCOPES)
+    assert not any("drive" in s for s in HEALTH_SCOPES)
+    assert ALL_SCOPES == HEALTH_SCOPES, "the health token must not carry Drive"
 
 
 def test_disabled_by_default():

@@ -35,7 +35,6 @@ MAX_DATA_AGE_DAYS = 2
 
 
 def cmd_fetch(args):
-    load_env(ROOT / ".env")
     since = (date.fromisoformat(args.since) if args.since
              else campaign.CAMPAIGN_START)
     print("Fetching from {} ...".format(since.isoformat()))
@@ -202,7 +201,7 @@ def cmd_build(args):
     # exit code either.
     if sheets.configured():
         try:
-            token = get_access_token(ROOT / ".env")
+            token = get_access_token(ROOT / ".env", "GSHEETS_REFRESH_TOKEN")
             sheet_id = sheets.publish(token, OUT_DIR,
                                       os.environ.get("COACH_SYNC_SHEET_ID"))
             if not os.environ.get("COACH_SYNC_SHEET_ID"):
@@ -285,6 +284,12 @@ def main(argv=None):
     p_build.set_defaults(func=cmd_build)
 
     args = parser.parse_args(argv)
+    # Load .env ONCE, here, before any command runs. Previously it happened as
+    # a side effect of get_access_token, so anything checked BEFORE the first
+    # auth call — like sheets.configured() — saw an empty environment and
+    # silently skipped. Config must be loaded before it is read, not as a
+    # by-product of something else.
+    load_env(ROOT / ".env")
     return args.func(args)
 
 

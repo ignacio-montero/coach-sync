@@ -49,12 +49,33 @@ def load_env(env_file: Path) -> None:
     _load_dotenv(env_file)
 
 
-def get_access_token(env_file: Path = Path(".env")) -> str:
+def get_access_token(env_file: Path = Path(".env"),
+                     refresh_key: str = "GHEALTH_REFRESH_TOKEN") -> str:
+    """Exchange a refresh token for an access token.
+
+    TWO refresh tokens, not one — and this is forced, not a preference.
+    The Google Health API rejects any access token that ALSO carries a Drive
+    scope:
+
+        403 PERMISSION_DENIED  DISALLOWED_OAUTH_SCOPES
+        disallowed_scopes: drive_resource
+
+    So a single token holding both the health scopes and drive.file cannot read
+    health data at all, even though the health scopes are present and valid.
+    The scope families have to live on separate tokens, obtained from separate
+    consent flows against the same OAuth client.
+
+    A useful side effect: the health token cannot touch Drive, and the Drive
+    token cannot read health data. Narrower than one combined token would be.
+
+        GHEALTH_REFRESH_TOKEN  -> the three googlehealth.* scopes
+        GSHEETS_REFRESH_TOKEN  -> drive.file only
+    """
     _load_dotenv(env_file)
 
     client_id = os.environ.get("GHEALTH_CLIENT_ID")
     client_secret = os.environ.get("GHEALTH_CLIENT_SECRET")
-    refresh_token = os.environ.get("GHEALTH_REFRESH_TOKEN")
+    refresh_token = os.environ.get(refresh_key)
     direct = os.environ.get("GHEALTH_ACCESS_TOKEN")
 
     # Refresh-token credentials WIN over a pasted access token. They are the
@@ -64,13 +85,14 @@ def get_access_token(env_file: Path = Path(".env")) -> str:
     # miserable thing to debug.
     if all([client_id, client_secret, refresh_token]):
         pass
-    elif direct:
+    elif direct and refresh_key == "GHEALTH_REFRESH_TOKEN":
         return direct.strip()
     else:
         raise SystemExit(
             "No credentials found.\n\n"
-            "Preferred: GHEALTH_CLIENT_ID / GHEALTH_CLIENT_SECRET /\n"
-            "GHEALTH_REFRESH_TOKEN in pipeline/.env — durable, works unattended.\n"
+            "Missing {} (plus GHEALTH_CLIENT_ID / GHEALTH_CLIENT_SECRET).\n"
+            "Health and Sheets need SEPARATE refresh tokens — Google Health\n"
+            "rejects any token that also carries a Drive scope.\n".format(refresh_key) +
             "Quick alternative: GHEALTH_ACCESS_TOKEN (expires in ~1 hour).\n"
             "See .env.example."
         )

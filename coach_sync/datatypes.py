@@ -24,7 +24,14 @@ SCOPE_ACTIVITY = "https://www.googleapis.com/auth/googlehealth.activity_and_fitn
 # spreadsheets. Needed to publish the Sheet a Claude Project reads.
 SCOPE_DRIVE_FILE = "https://www.googleapis.com/auth/drive.file"
 
-ALL_SCOPES = [SCOPE_METRICS, SCOPE_SLEEP, SCOPE_ACTIVITY, SCOPE_DRIVE_FILE]
+# ⚠️ THESE TWO SETS MUST BE AUTHORISED SEPARATELY, onto two refresh tokens.
+# The Google Health API returns 403 DISALLOWED_OAUTH_SCOPES (drive_resource)
+# for any access token that also carries a Drive scope — the health scopes
+# being present does not save it. Verified against the live API 2026-08-30.
+HEALTH_SCOPES = [SCOPE_METRICS, SCOPE_SLEEP, SCOPE_ACTIVITY]
+SHEETS_SCOPES = [SCOPE_DRIVE_FILE]
+
+ALL_SCOPES = HEALTH_SCOPES   # what GHEALTH_REFRESH_TOKEN must carry
 
 
 @dataclass(frozen=True)
