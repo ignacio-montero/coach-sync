@@ -62,9 +62,15 @@ jobs:
       - name: Assert no secrets or health data in the image
         run: |
           docker build -q -t coach-sync:ci-check .
-          found=$(docker run --rm --entrypoint sh coach-sync:ci-check -c \
+          # --user root, for two reasons. The image runs as uid 1000, and a
+          # non-root `find /` (a) cannot traverse /root, so a secret there
+          # would be missed, and (b) exits 1 on permission-denied, which under
+          # `bash -e` aborted this step before the check even ran. The result
+          # was a red build that proved nothing.
+          # `|| true` keeps a find exit code from masking the real assertion.
+          found=$(docker run --rm --user root --entrypoint sh coach-sync:ci-check -c \
             'find / -xdev \( -name ".env" -o -name ".env.*" -o -name "manual.csv" \
-                          -o -name "campaign.toml" -o -name "metrics_*.csv" \) -print 2>/dev/null')
+                          -o -name "campaign.toml" -o -name "metrics_*.csv" \) -print 2>/dev/null || true')
           if [ -n "$found" ]; then
             echo "::error::sensitive files present in the image:"; echo "$found"; exit 1
           fi
