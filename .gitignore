@@ -1,0 +1,22 @@
+# ─── SECRETS ───────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ─── PERSONAL HEALTH DATA — never commit ───────────────────────────────
+# Real body-composition targets, thresholds and baselines.
+campaign.toml
+!campaign.example.toml
+
+# Every output file: weights, body fat, sleep, heart rate, lifts, waist.
+# NB: "data/*" not "data/" — git will not descend into an excluded
+# directory, so a negation inside one is never reached.
+data/*
+!data/.gitkeep
+
+# ─── ENVIRONMENT ───────────────────────────────────────────────────────
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store

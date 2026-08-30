@@ -1,0 +1,39 @@
+# Campaign configuration — EXAMPLE.
+#
+# Copy to campaign.toml and fill in real values. campaign.toml is gitignored:
+# a weight ladder, a lean-mass floor and a resting-heart-rate baseline are
+# personal health data and must never be committed.
+#
+#   cp campaign.example.toml campaign.toml
+
+[campaign]
+start_date = "2026-01-05"     # Monday of week 1
+total_weeks = 18
+
+[targets]
+# Weekly checkpoint ladder: week number -> target 7-day mean weight (kg).
+checkpoints = [
+    90.0, 89.6, 89.2, 89.2, 89.2, 88.7, 88.2, 87.7, 87.3,
+    86.9, 86.4, 86.0, 85.6, 85.6, 85.1, 84.7, 84.3, 84.3,
+]
+maintenance_weeks = [4, 5, 14, 18]   # target is FLAT; flat is a success
+
+[thresholds]
+lean_floor_kg = 70.0          # below this, cut the deficit before anything else
+rhr_baseline = 50.0
+rhr_elevated = 55.0           # sustained above this -> reduce load for a week
+max_loss_kg_per_week = 0.6    # faster than this costs lean mass
+
+[phases]
+INSTALL   = [1, 3]
+TRAVEL    = [4, 5]
+CALIBRATE = [6, 9]
+DRIVE     = [10, 13]
+FINISH    = [14, 18]
+
+[benchmarks]
+"2026-01-11" = "B0"
+"2026-02-15" = "B1"
+"2026-03-15" = "B2"
+"2026-04-12" = "B3"
+"2026-05-10" = "B4"

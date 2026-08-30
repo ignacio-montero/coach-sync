@@ -1,0 +1,85 @@
+"""Access-token handling.
+
+Two modes, deliberately:
+
+1. GHEALTH_ACCESS_TOKEN — paste a token straight from the OAuth 2.0 Playground.
+   Expires in ~1 hour. Fine for a one-off run today; useless for a daily job.
+
+2. Client ID + secret + refresh token — exchanges for a fresh access token on
+   every run. This is what the homelab container will use.
+
+Credentials are read from the environment or a local .env. They are never
+logged, never written to the data files, and never leave this machine.
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import httpx
+
+TOKEN_URL = "https://oauth2.googleapis.com/token"
+
+
+def _load_dotenv(path: Path) -> None:
+    """Minimal .env reader — avoids a dependency for six lines of parsing."""
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+def get_access_token(env_file: Path = Path(".env")) -> str:
+    _load_dotenv(env_file)
+
+    client_id = os.environ.get("GHEALTH_CLIENT_ID")
+    client_secret = os.environ.get("GHEALTH_CLIENT_SECRET")
+    refresh_token = os.environ.get("GHEALTH_REFRESH_TOKEN")
+    direct = os.environ.get("GHEALTH_ACCESS_TOKEN")
+
+    # Refresh-token credentials WIN over a pasted access token. They are the
+    # durable path — an access token lives about an hour, so if both are
+    # present the pasted one is almost certainly a stale leftover. Preferring
+    # it would make the job fail an hour after it last worked, which is a
+    # miserable thing to debug.
+    if all([client_id, client_secret, refresh_token]):
+        pass
+    elif direct:
+        return direct.strip()
+    else:
+        raise SystemExit(
+            "No credentials found.\n\n"
+            "Preferred: GHEALTH_CLIENT_ID / GHEALTH_CLIENT_SECRET /\n"
+            "GHEALTH_REFRESH_TOKEN in pipeline/.env — durable, works unattended.\n"
+            "Quick alternative: GHEALTH_ACCESS_TOKEN (expires in ~1 hour).\n"
+            "See .env.example."
+        )
+
+    resp = httpx.post(
+        TOKEN_URL,
+        data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        },
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        # invalid_grant here is very likely OQ-5: refresh tokens issued while the
+        # OAuth app is in "Testing" status expire after 7 days.
+        raise SystemExit(
+            "Token refresh failed ({}): {}\n\n"
+            "If this says 'invalid_grant', the refresh token has expired. An\n"
+            "OAuth app in 'Testing' publishing status issues refresh tokens that\n"
+            "die after 7 days. Publish the consent screen to 'In production'\n"
+            "AND re-authorise — publishing does not extend tokens already\n"
+            "issued under Testing. See ARCHITECTURE.md OQ-5.".format(
+                resp.status_code, resp.text[:300]
+            )
+        )
+    return resp.json()["access_token"]
