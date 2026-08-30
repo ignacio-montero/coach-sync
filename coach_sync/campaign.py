@@ -16,13 +16,23 @@ committed as a template with obviously-fake numbers.
 """
 from __future__ import annotations
 
+import os
 import tomllib
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Dict, Optional
 
 _ROOT = Path(__file__).resolve().parent.parent
-_CONFIG = _ROOT / "campaign.toml"
+
+# Overridable so the container can mount the real config from a DIRECTORY
+# (`/app/config/campaign.toml`) instead of bind-mounting a single file over
+# `/app/campaign.toml`. Single-file bind mounts are a footgun: if the host path
+# does not exist when the container starts, Docker silently creates an empty
+# DIRECTORY there, and the failure surfaces as `IsADirectoryError` deep in this
+# module rather than as "your config is missing".
+CONFIG_PATH = Path(os.environ.get("COACH_SYNC_CAMPAIGN_CONFIG")
+                   or _ROOT / "campaign.toml")
+_CONFIG = CONFIG_PATH
 _EXAMPLE = _ROOT / "campaign.example.toml"
 
 

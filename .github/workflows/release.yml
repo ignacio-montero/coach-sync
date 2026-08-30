@@ -1,0 +1,80 @@
+# RELEASE — publish a pinned, versioned image to GHCR when a v* tag is pushed.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#     -> ghcr.io/ignacio-montero/coach-sync:0.1.0
+#
+# WHY A REGISTRY AT ALL, instead of building on the server:
+# the homelab is a 4-core N95 with 8 GB of soldered RAM. A registry turns
+# "compile on the box, hope it works" into "pull a byte-identical artifact that
+# already passed CI". It also makes rollback trivial — the previous tag is still
+# sitting there, so reverting is a one-line compose edit rather than a rebuild
+# of code you may no longer have checked out.
+#
+# WHY GITHUB'S RUNNERS instead of `docker buildx` on the Mac: the Mac is arm64
+# and the box is amd64, so a local build needs QEMU emulation and takes minutes.
+# GitHub's runners are native amd64 — faster, and it removes "the Mac was asleep"
+# as a reason a release did not happen.
+#
+# ⚠️ Package visibility: a package published by Actions inherits the REPO's
+# visibility, and this repo is public. Set the package to PRIVATE once, at
+# github.com/users/ignacio-montero/packages/container/coach-sync/settings, to
+# match plaque-hunter and legobot. The image holds no secrets and no health data
+# either way — this is defence in depth, not a repair.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write          # least privilege: exactly enough to push to GHCR
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive the version from the tag
+        id: version
+        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.23"
+          enable-cache: true
+
+      # A tag that fails its tests must not become a deployable image.
+      - run: uv sync --frozen && uv run --frozen python -m pytest tests/ -q
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          # Short-lived, scoped to this run — no personal access token to leak
+          # or rotate. This is the right shape for CI credentials.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push (linux/amd64 — the box's architecture)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          # NOTE: only the immutable version tag. No `:latest` on purpose —
+          # `:latest` makes `docker ps` unable to answer "what is running?" and
+          # turns a rollback into an archaeology exercise.
+          tags: ghcr.io/${{ github.repository_owner }}/coach-sync:${{ steps.version.outputs.value }}
+          build-args: VERSION=${{ steps.version.outputs.value }}
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Next step
+        run: |
+          echo "Published ghcr.io/${{ github.repository_owner }}/coach-sync:${{ steps.version.outputs.value }}"
+          echo "Now bump the tag in ~/Development/homelab/services/coach-sync/docker-compose.yml"
+          echo "and run the pull loop — see deploy/DEPLOY.md section 7."

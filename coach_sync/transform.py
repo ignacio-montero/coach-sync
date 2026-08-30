@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from . import campaign
+from .clock import today as london_today
 
 
 class ShrinkGuard(Exception):
@@ -647,7 +648,10 @@ def staleness_days(weekly: List[dict], today: Optional[date] = None) -> Optional
     clock: `today` is injectable precisely so the stale branch is reachable in
     a test. An untestable safety check tends to be an untested one.
     """
-    today = today or date.today()
+    # London, not the container's local zone — a UTC container between 23:00
+    # and midnight BST would compute a staleness one day short and let a stale
+    # dataset pass the freshness check. See clock.py.
+    today = today or london_today()
     dated = [row["data_through"] for row in weekly if row.get("data_through")]
     if not dated:
         return None

@@ -18,6 +18,7 @@ from pathlib import Path
 
 from . import campaign, hevy, transform
 from .auth import get_access_token, load_env
+from .clock import today as london_today
 from .datatypes import REGISTRY
 from .extract import extract_all, latest_raw
 
@@ -93,7 +94,11 @@ def cmd_build(args):
 
     # sleep and exercise are fetched unfiltered (their server-side filter syntax
     # is unresolved), so the campaign window is applied here instead.
-    win_start, win_end = campaign.CAMPAIGN_START, date.today()
+    # `london_today()`, not `date.today()`: the window's closing edge is a
+    # LONDON civil date. A default-UTC container running late in the evening
+    # during BST would close the window a day early and silently drop that
+    # day's weigh-in, sleep and sessions. See clock.py.
+    win_start, win_end = campaign.CAMPAIGN_START, london_today()
 
     sleep_path = latest_raw(RAW_DIR, "sleep")
     if sleep_path:

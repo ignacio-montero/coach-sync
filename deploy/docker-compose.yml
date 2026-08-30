@@ -1,0 +1,118 @@
+# coach-sync — daily Google Health + Hevy ETL job.
+#
+# Copy this to the homelab control repo as
+#   ~/Development/homelab/services/coach-sync/docker-compose.yml
+# and add that path to the root compose.yaml `include:` list.
+#
+# Source repo: github.com/ignacio-montero/coach-sync (runbook: deploy/DEPLOY.md)
+#
+# Conventions honoured (from ~/Development/homelab/docs):
+#  - NO published ports. Every conversation it has (health.googleapis.com,
+#    api.hevyapp.com, api.telegram.org) is OUTBOUND, so there is nothing to
+#    bind, no UFW rule to add, and no Docker-bypasses-UFW exposure to reason
+#    about. Same shape as legobot and the tennisbot sidecars.
+#  - Pinned versioned GHCR image; the box PULLS, never builds (an N95 building
+#    Python wheels is minutes of a 4-core box's life, for a byte-identical
+#    result).
+#  - Secrets in an UNTRACKED .env in THIS directory ON THE SERVER.
+#  - mem_limit set, per the 8 GB soldered ceiling.
+#  - Self-scheduling internal loop, no host crontab and no Docker socket —
+#    the tennisbot-drop pattern (homelab decisions.md, 2026-07-22).
+#
+# ⚠️ It reuses the existing Telegram BOT TOKEN but only ever calls sendMessage.
+#    The "only one process may long-poll a token" rule (legobot, HTTP 409)
+#    applies to getUpdates, which this service never calls.
+services:
+  coach-sync:
+    image: ghcr.io/ignacio-montero/coach-sync:0.1.0   # pin a version; never :latest
+    container_name: coach-sync
+    restart: unless-stopped
+    init: true                 # PID 1 that reaps the fetch/build child processes
+
+    # Credentials only. Everything non-secret is inlined below so the config is
+    # reproducible from git; the .env holds nothing but things that must not be.
+    env_file: .env
+
+    environment:
+      # ⚠️ LOAD-BEARING. The job's data window closes at "today", and a
+      # default-UTC container between 23:00 and midnight BST computes yesterday
+      # — silently dropping a day of weigh-ins, sleep and sessions. The code
+      # names Europe/London explicitly (coach_sync/clock.py) so it is correct
+      # even without this, and asserts at startup that this line is present:
+      # remove it and the container refuses to start rather than drifting.
+      # Naming the zone (not an offset) is what makes the 25 Oct BST->GMT
+      # change a no-op instead of an edit.
+      TZ: "Europe/London"
+
+      RUN_AT: "06:30"                # after the morning weigh-in, before the day
+      # Real targets/thresholds are personal health data: never in the image,
+      # never in git. Mounted read-only from the server (see volumes).
+      COACH_SYNC_CAMPAIGN_CONFIG: "/app/config/campaign.toml"
+
+      CATCH_UP: "true"               # reboot-safe: a missed slot runs on start
+      FETCH_RETRIES: "1"             # one retry absorbs transient 5xx/network
+      RETRY_DELAY_MINUTES: "10"
+      RAW_KEEP: "14"                 # raw captures kept PER DATA TYPE (~6 MB)
+      MAX_SILENCE_HOURS: "30"        # no run in 30h => container reports unhealthy
+      # Alerts carry the failure's SHAPE, not its contents: `build` prints
+      # weights and lean mass, and Telegram is a third-party custodian
+      # (ARCHITECTURE.md section 7). Full output stays in `docker logs`/Dozzle.
+      ALERT_INCLUDE_OUTPUT: "false"
+      NOTIFY_ON_SUCCESS: "false"     # flip to "true" for a week if you want proof of life
+
+    volumes:
+      # BIND MOUNTS, not named volumes — three reasons, in order of importance:
+      #
+      # 1. input/ is hand-entered ground truth (waist measurements). No API can
+      #    regenerate it; losing it loses it permanently. A named volume is one
+      #    `docker compose down -v` away from gone, and `down -v` is a normal
+      #    thing to type while debugging. A bind mount lives in the host
+      #    filesystem: `down -v` cannot touch it, `docker volume prune` cannot
+      #    touch it, and re-creating the container cannot touch it. It is also
+      #    mounted :ro, so even a buggy container cannot truncate it.
+      # 2. The Mac pulls the CSVs with rsync over Tailscale (ARCHITECTURE.md
+      #    D-013). A host path is rsync-able as user nacho; a named volume lives
+      #    under root-owned /var/lib/docker/volumes and needs sudo gymnastics.
+      # 3. Backups are `cp -a /srv/coach-sync` — no Docker involved.
+      #
+      # Ownership: the container runs as uid 1000, which is `nacho` on the box,
+      # so `sudo chown -R 1000:1000 /srv/coach-sync` once is all the setup there
+      # is (bind mounts pass host ownership straight through — no uid mapping).
+      - /srv/coach-sync/data:/app/data          # CSVs + raw landing zone (rw)
+      - /srv/coach-sync/input:/app/input:ro     # ⚠️ IRREPLACEABLE hand-entered data
+      - /srv/coach-sync/config:/app/config:ro   # campaign.toml (real targets)
+
+    # Measured: the heaviest path (parse a full Hevy dump + a week of sleep,
+    # rebuild all four CSVs) peaks under 64 MB — it completed inside a 64 MB
+    # cgroup. 192m is 3x headroom for a campaign's worth of accumulated rows,
+    # and matches legobot, the other httpx-only service on the box. A limit is a
+    # ceiling, not a reservation: unused MB cost nothing.
+    mem_limit: 192m
+    memswap_limit: 192m       # cap swap too, so a runaway can't thrash zram
+
+    # Hardening. The app writes ONLY to /app/data, so the rest of the
+    # filesystem can be immutable; verified by running the full build path with
+    # --read-only. Nothing here needs elevated privileges: it makes three
+    # outbound HTTPS calls and writes four CSVs.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # NOTE: the healthcheck ships in the IMAGE (see the repo's Dockerfile) so it
+    # cannot drift from the code it tests. It asserts an OUTCOME — the last
+    # cycle exited 0, and happened within MAX_SILENCE_HOURS — rather than
+    # liveness, because a daily job is asleep 99.9% of the time and "the process
+    # exists" would pass even if it had never successfully fetched anything.
+    # `docker ps` therefore becomes a second alerting channel alongside Telegram.
+
+# No `volumes:` block and no `ports:` — this service publishes nothing and owns
+# no named volumes. Its persistent state is entirely under /srv/coach-sync on
+# the host, which is deliberately outside Docker's lifecycle.

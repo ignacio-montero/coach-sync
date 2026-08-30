@@ -61,11 +61,15 @@ Interpolating it would launder a gap into a measurement.
 ## Setup
 
 ```bash
-uv venv --python 3.12 && uv pip install httpx
+uv sync                                       # installs from uv.lock, exactly
 cp .env.example .env                          # credentials
 cp campaign.example.toml campaign.toml        # targets and thresholds
 cp input/manual.example.csv input/manual.csv  # hand-measured inputs
 ```
+
+Dependencies are locked (`uv.lock`) and installed frozen everywhere — locally,
+in CI and in the image. A job whose correctness depends on HTTP behaviour should
+not silently change HTTP libraries between rebuilds.
 
 `input/` holds measurements no API can supply — a tape measure, essentially.
 It is deliberately outside `data/`, which is derived and regenerable: a clean
@@ -94,6 +98,27 @@ python -m pytest tests/ -q
 25 tests, aimed at the branches where a wrong number changes a decision —
 threshold breaches, rate caps, sleep attribution across midnight, top-set
 selection when sets tie on weight — rather than at line coverage.
+
+## Deployment
+
+The job is packaged as a Docker image and runs as a self-scheduling container
+(wakes at 06:30 Europe/London, runs one cycle, sleeps) with no published ports —
+it only makes outbound calls. Failures reach a phone via Telegram and flip the
+container's healthcheck, because the failure mode that matters here is not a
+crash but *silence*: stale CSVs still parse and still look plausible.
+
+```bash
+docker build -t coach-sync .
+# see deploy/DEPLOY.md for the full runbook
+```
+
+- [`Dockerfile`](Dockerfile) — multi-stage build, non-root, read-only rootfs.
+- [`.dockerignore`](.dockerignore) — deny-by-default: no credentials or health
+  data can reach an image layer, which is important because layers are immutable.
+- [`deploy/docker-compose.yml`](deploy/docker-compose.yml) — pinned image tag,
+  memory limit, bind-mounted persistent data.
+- [`deploy/DEPLOY.md`](deploy/DEPLOY.md) — first deploy, verification, upgrade,
+  rollback, retention and troubleshooting.
 
 ## Privacy and publishing
 

@@ -3,7 +3,32 @@ name = "coach-sync"
 version = "0.1.0"
 description = "Daily body-composition and training data pipeline for the Marta Ibanez coaching campaign"
 requires-python = ">=3.12"
-dependencies = ["httpx>=0.27"]
+
+# Ranges here express COMPATIBILITY; uv.lock pins the EXACT versions that get
+# installed. The container installs `--frozen` from the lock, so a rebuild in
+# six months resolves to the same bytes as today. This job's correctness
+# depends on HTTP details (redirects, timeouts, header casing, retry-on-close);
+# an unpinned `httpx>=0.27` could pick up a behaviour change and turn a silent
+# fetch failure into stale CSVs nobody notices.
+dependencies = [
+    "httpx>=0.27,<0.29",
+    # zoneinfo needs an IANA database. Debian slim images do NOT ship
+    # /usr/share/zoneinfo, so ZoneInfo("Europe/London") would raise
+    # ZoneInfoNotFoundError at runtime. This pure-Python package is the
+    # documented fallback and makes the image self-contained.
+    # NB: pinning tzdata freezes the DST rules at build time. The Oct 2026
+    # BST->GMT transition is decades old, so the pinned copy already knows it;
+    # rebuild + republish if a government ever changes the rules mid-campaign.
+    "tzdata>=2026.1",
+]
+
+[dependency-groups]
+# PEP 735 dependency group. Installed for tests and CI, excluded from the
+# runtime image with `uv sync --no-dev` — test tooling in a production image is
+# extra attack surface and extra megabytes for zero benefit.
+dev = [
+    "pytest>=8.0",
+]
 
 [tool.uv]
 package = false

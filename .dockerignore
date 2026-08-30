@@ -1,0 +1,56 @@
+# .dockerignore — DENY BY DEFAULT.
+#
+# WHY deny-by-default and not a deny-list of known-bad paths:
+# the build context is uploaded to the daemon and anything COPY'd lands in an
+# IMMUTABLE image layer. `RUN rm secret` does not remove it — the earlier layer
+# still holds the file, and `docker history` / `docker save` / any `docker pull`
+# of the published tag recovers it. A deny-list fails the moment someone adds a
+# new file (a second .env, a CSV export, a Takeout dump); an allow-list fails
+# closed instead: a new secret is invisible to the build until someone
+# deliberately un-ignores it.
+#
+# This directory currently holds .env, .env.bak, data/ (every weigh-in, sleep
+# and lift record) and input/manual.csv (waist measurements). None of it may
+# ever reach a layer — the published image is a public artifact.
+#
+# Syntax note: `*` excludes everything at the context root (and, because Docker
+# matches the full relative path, everything under those roots too). `!` lines
+# re-include. Last matching rule wins, so the allow-list must come after `*`.
+
+*
+
+# ── The application, and only the application ──────────────────────────
+!coach_sync
+!coach_sync/**
+
+# ── Dependency manifest + lockfile (installed frozen in the builder) ───
+!pyproject.toml
+!uv.lock
+
+# ── Public, non-personal metadata worth having inside the image ────────
+!README.md
+!LICENSE
+
+# ── Belt and braces ────────────────────────────────────────────────────
+# These are already covered by `*`. They are restated so that a future edit
+# which loosens the allow-list (e.g. someone adds `!*.toml` or `!.` ) cannot
+# silently re-admit them: these lines come last, so they win.
+.env
+.env.*
+campaign.toml
+data
+data/**
+input
+input/**
+Takeout
+Takeout/**
+**/__pycache__
+**/*.pyc
+.venv
+.git
+.pytest_cache
+**/.DS_Store
+tests
+scripts
+deploy
+.github
