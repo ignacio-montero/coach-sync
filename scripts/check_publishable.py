@@ -43,8 +43,17 @@ BLOCKED_CONTENT = [
      "credential assigned a real value"),
 ]
 
-# Files allowed to mention otherwise-blocked content (docs describing patterns).
-ALLOWLIST = {"scripts/check_publishable.py", "PUBLISHING.md"}
+# Files allowed to mention otherwise-blocked content.
+#
+# PRIVACY.md carries a support email BY DESIGN — a privacy policy needs a
+# contact address, and the author accepted that exposure knowingly on
+# 2026-08-30. Everywhere else, that address is still blocked: a stray email in
+# source or in a data file is an accident, not a decision.
+ALLOWLIST = {
+    "scripts/check_publishable.py",   # this file describes the patterns
+    "PUBLISHING.md",                  # documents them too
+    "PRIVACY.md",                     # deliberate: support contact
+}
 
 
 def staged_files() -> list:
