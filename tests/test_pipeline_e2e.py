@@ -30,7 +30,7 @@ import pytest
 from coach_sync import campaign, hevy, transform
 from coach_sync.__main__ import annotate_anchors, gym_as_sessions
 
-from conftest import day_in_week, hevy_workout, weighed
+from conftest import day_in_week, hevy_workout, weighed, weighed_week
 
 
 def read_back(path):
@@ -75,7 +75,9 @@ def test_hevy_workouts_re_enter_the_session_count_after_watch_dedup():
 def test_the_weekly_csv_round_trips_through_the_writer(tmp_path):
     """write_csv -> read back. Catches a column present in the dicts but missing
     from WEEKLY_COLUMNS (extrasaction='ignore' would drop it in silence)."""
-    weekly = transform.build_weekly([weighed(1, 0, 84.0, 19.4)], [])
+    # A full week, so the judgement flags actually engage — this test is about
+    # how a real boolean serialises, and a thin week would blank it to "".
+    weekly = transform.build_weekly(weighed_week(1, 84.0, 19.4), [])
     annotate_anchors(weekly, [])
     path = tmp_path / "metrics_weekly.csv"
     transform.write_csv(path, transform.WEEKLY_COLUMNS, weekly)

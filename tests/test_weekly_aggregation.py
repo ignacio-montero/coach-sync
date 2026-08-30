@@ -22,9 +22,11 @@ from datetime import timedelta
 
 import pytest
 
+from datetime import date
+
 from coach_sync import campaign, transform
 
-from conftest import daily_row, day_in_week, watch_session, weighed
+from conftest import daily_row, day_in_week, watch_session, weighed, weighed_week
 
 
 def week(rows, sessions=(), manual=None, index=0):
@@ -53,13 +55,13 @@ def test_BUG_weight_delta_is_a_one_week_delta_even_across_a_gap():
     Reported as a one-week delta it reads as -1.6 kg/week and trips
     `losing_too_fast`, which tells the coach to loosen a deficit that is fine.
     """
-    rows = [weighed(1, 0, 84.0), weighed(4, 0, 82.4)]
+    rows = weighed_week(1, 84.0) + weighed_week(4, 82.4)
     w4 = transform.build_weekly(rows, [])[1]
     assert w4["weight_delta_kg"] == "" or w4["weight_delta_kg"] > -0.6
 
 
 def test_losing_too_fast_does_not_fire_on_a_gap_spanning_delta():
-    rows = [weighed(1, 0, 84.0), weighed(4, 0, 82.4)]
+    rows = weighed_week(1, 84.0) + weighed_week(4, 82.4)
     assert transform.build_weekly(rows, [])[1]["losing_too_fast"] is False
 
 
@@ -67,7 +69,7 @@ def test_rate_cap_fires_on_a_genuinely_contiguous_week():
     """The control for the two xfails above: consecutive weeks, real overshoot.
     Without this pair you cannot tell 'the flag works' from 'the flag is stuck on'."""
     over = campaign.MAX_SAFE_LOSS_KG_PER_WEEK + 0.2
-    rows = [weighed(6, 0, 84.0), weighed(7, 0, 84.0 - over)]
+    rows = weighed_week(6, 84.0) + weighed_week(7, 84.0 - over)
     assert transform.build_weekly(rows, [])[1]["losing_too_fast"] is True
 
 
@@ -75,12 +77,12 @@ def test_rate_cap_does_not_fire_exactly_at_the_cap():
     """Boundary-value analysis: the condition is `< -cap`, so a loss of exactly
     the cap must NOT fire. Off-by-one at a threshold is the classic silent bug."""
     exact = campaign.MAX_SAFE_LOSS_KG_PER_WEEK
-    rows = [weighed(6, 0, 84.0), weighed(7, 0, round(84.0 - exact, 2))]
+    rows = weighed_week(6, 84.0) + weighed_week(7, round(84.0 - exact, 2))
     assert transform.build_weekly(rows, [])[1]["losing_too_fast"] is False
 
 
 def test_gain_never_trips_the_loss_flag():
-    rows = [weighed(6, 0, 82.0), weighed(7, 0, 83.5)]
+    rows = weighed_week(6, 82.0) + weighed_week(7, 83.5)
     assert transform.build_weekly(rows, [])[1]["losing_too_fast"] is False
 
 
@@ -94,9 +96,9 @@ def test_weight_delta_is_blank_when_there_is_no_earlier_weight_at_all():
 def test_a_week_with_only_sleep_does_not_reset_the_delta_chain():
     """W2 has sleep but no scale. W3's delta must still be computable, and must
     not silently become a delta-against-nothing."""
-    rows = [weighed(1, 0, 84.0),
-            daily_row(2, 0, sleep_hours=7.4),
-            weighed(3, 0, 83.5)]
+    rows = (weighed_week(1, 84.0)
+            + [daily_row(2, 0, sleep_hours=7.4)]
+            + weighed_week(3, 83.5))
     weeks = transform.build_weekly(rows, [])
     assert [w["week"] for w in weeks] == ["W01", "W02", "W03"]
     assert weeks[1]["weight_7d_mean"] == ""
@@ -115,15 +117,17 @@ def test_delta_vs_target_is_blank_rather_than_zero_when_the_week_has_no_weight()
 def test_lean_floor_breach_fires_just_below_the_configured_floor():
     """Boundary-value analysis around the single most consequential threshold."""
     floor = campaign.LEAN_FLOOR_KG
-    rows = [daily_row(11, 0, weight_kg=80.0, body_fat_pct=17.0,
-                      lean_kg=round(floor - 0.1, 2))]
+    rows = [daily_row(11, i, weight_kg=80.0, body_fat_pct=17.0,
+                      lean_kg=round(floor - 0.1, 2))
+            for i in range(transform.MIN_WEIGHINS_FOR_FLAGS)]
     assert week(rows)["lean_floor_breach"] is True
 
 
 def test_lean_floor_breach_does_not_fire_exactly_at_the_floor():
     """Condition is `< floor`, so sitting exactly on it is not a breach."""
-    rows = [daily_row(11, 0, weight_kg=80.0, body_fat_pct=17.0,
-                      lean_kg=campaign.LEAN_FLOOR_KG)]
+    rows = [daily_row(11, i, weight_kg=80.0, body_fat_pct=17.0,
+                      lean_kg=campaign.LEAN_FLOOR_KG)
+            for i in range(transform.MIN_WEIGHINS_FOR_FLAGS)]
     assert week(rows)["lean_floor_breach"] is False
 
 
@@ -131,10 +135,14 @@ def test_lean_floor_uses_the_weekly_mean_not_a_single_bad_day():
     """One noisy BIA reading below the floor must not trigger the campaign's
     most disruptive instruction. The mean is the guard; pin it."""
     floor = campaign.LEAN_FLOOR_KG
-    rows = [daily_row(11, 0, weight_kg=80.0, body_fat_pct=17.0,
-                      lean_kg=round(floor - 1.0, 2)),
-            daily_row(11, 1, weight_kg=80.0, body_fat_pct=15.0,
-                      lean_kg=round(floor + 2.0, 2))]
+    # The pair is repeated so the week is thick enough for the flag to engage
+    # while the mean stays exactly floor + 0.5.
+    rows = []
+    for i in range(2):
+        rows.append(daily_row(11, i * 2, weight_kg=80.0, body_fat_pct=17.0,
+                              lean_kg=round(floor - 1.0, 2)))
+        rows.append(daily_row(11, i * 2 + 1, weight_kg=80.0, body_fat_pct=15.0,
+                              lean_kg=round(floor + 2.0, 2)))
     w = week(rows)
     assert w["lean_7d_mean"] == round(floor + 0.5, 2)
     assert w["lean_floor_breach"] is False
@@ -278,3 +286,29 @@ def test_build_weekly_emits_every_column_the_writer_expects_except_the_two_cli_a
 def test_empty_input_produces_an_empty_report_not_a_crash():
     assert transform.build_weekly([], []) == []
     assert transform.build_daily({}) == []
+
+
+# ------------------------------------------------------------- staleness
+
+def test_staleness_is_zero_when_data_is_current():
+    weekly = [{"data_through": "2026-08-30"}]
+    assert transform.staleness_days(weekly, today=date(2026, 8, 30)) == 0
+
+
+def test_staleness_counts_days_since_the_newest_record():
+    """The scenario this exists for: fetch failed, build ran against yesterday's
+    raw files and produced a perfectly well-formed CSV of stale numbers."""
+    weekly = [{"data_through": "2026-08-21"}]
+    assert transform.staleness_days(weekly, today=date(2026, 8, 30)) == 9
+
+
+def test_staleness_is_none_when_nothing_is_dated():
+    """Distinct from 'fresh'. Nothing parsed at all is a different failure and
+    gets a different exit code."""
+    assert transform.staleness_days([{"data_through": ""}]) is None
+    assert transform.staleness_days([]) is None
+
+
+def test_staleness_uses_the_newest_row_not_the_last_one():
+    weekly = [{"data_through": "2026-08-30"}, {"data_through": "2026-08-24"}]
+    assert transform.staleness_days(weekly, today=date(2026, 8, 30)) == 0

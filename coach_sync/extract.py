@@ -12,6 +12,7 @@ what the source actually said, because your understanding of it will change.
 from __future__ import annotations
 
 import json
+import os
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
@@ -77,7 +78,13 @@ def extract_all(access_token: str, since: date, raw_dir: Path) -> Dict[str, Path
                 continue
 
             path = raw_dir / "{}_{}.json".format(name, stamp)
-            path.write_text(json.dumps(points, indent=2))
+            # Atomic: a container kill, OOM or full disk mid-write would
+            # otherwise leave truncated JSON. latest_raw() picks the newest
+            # filename, so that broken file would be chosen forever and every
+            # subsequent build would fail with no way to self-heal.
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(points, indent=2))
+            os.replace(tmp, path)
             written[name] = path
             print("  {:4d} points -> {}".format(len(points), path.name))
 
@@ -85,6 +92,19 @@ def extract_all(access_token: str, since: date, raw_dir: Path) -> Dict[str, Path
 
 
 def latest_raw(raw_dir: Path, name: str) -> Path | None:
-    """Most recent raw file for a data type, so transform can re-run offline."""
-    matches = sorted(raw_dir.glob("{}_*.json".format(name)))
-    return matches[-1] if matches else None
+    """Most recent PARSEABLE raw file, so transform can re-run offline.
+
+    Newest-first with a parse check, rather than blindly taking the newest:
+    a corrupt file would otherwise poison every future build permanently, since
+    it stays newest forever. Falling back to the previous good file degrades to
+    stale-but-valid, which the staleness check in `build` then surfaces.
+    """
+    matches = sorted(raw_dir.glob("{}_*.json".format(name)), reverse=True)
+    for path in matches:
+        try:
+            json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            print("  ! ignoring unreadable raw file: {}".format(path.name))
+            continue
+        return path
+    return None

@@ -8,6 +8,12 @@
 campaign.toml
 !campaign.example.toml
 
+# Hand-entered ground truth (waist). Lives OUTSIDE data/ because data/ is
+# regenerable and a clean rebuild would destroy it — but it is still health
+# data and still must never be committed.
+input/*
+!input/manual.example.csv
+
 # Every output file: weights, body fat, sleep, heart rate, lifts, waist.
 # NB: "data/*" not "data/" — git will not descend into an excluded
 # directory, so a negation inside one is never reached.

@@ -73,24 +73,13 @@ def test_a_ragged_row_with_extra_fields_does_not_lose_the_named_columns(manual_c
     assert got[date(2026, 8, 24)]["waist_navel_cm"] == "92.0"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG: a UTF-8 BOM (what Excel and Google Sheets write by default when you "
-    "'Download as CSV') makes the first header '\\ufeffdate', so the 'date' key "
-    "is missing, EVERY row is skipped by the KeyError branch, and read_manual "
-    "returns {}. The waist column silently empties and nothing reports it. "
-    "Fix: open with encoding='utf-8-sig'."))
-def test_BUG_a_file_saved_with_a_bom_is_still_read(manual_csv):
+def test_a_file_saved_with_a_bom_is_still_read(manual_csv):
     path = manual_csv("date,waist_navel_cm\r\n2026-08-24,92.0\r\n", encoding="utf-8-sig")
     assert transform.read_manual(path) == {
         date(2026, 8, 24): {"waist_navel_cm": "92.0"}}
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG: when the date column is not first and a row is short, DictReader fills "
-    "the missing 'date' with None; date.fromisoformat(None) raises TypeError, "
-    "which the `except (ValueError, KeyError)` does not catch. One truncated "
-    "line aborts the whole build."))
-def test_BUG_a_short_row_does_not_crash_the_build(manual_csv):
+def test_a_short_row_does_not_crash_the_build(manual_csv):
     text = "waist_navel_cm,date\n92.0\n89.0,2026-08-24\n"
     assert transform.read_manual(manual_csv(text)) == {
         date(2026, 8, 24): {"waist_navel_cm": "89.0"}}

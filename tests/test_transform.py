@@ -133,8 +133,10 @@ def test_protobuf_duration_strings_are_parsed():
 
 def test_lean_floor_breach_fires_below_the_floor():
     """The one rule that overrides everything else in the campaign."""
-    rows = [_daily(date="2026-11-02", weight_kg=80.0, body_fat_pct=17.0,
-                   lean_kg=campaign.LEAN_FLOOR_KG - 0.6, campaign_week=11)]
+    rows = [_daily(date="2026-11-0%d" % (2 + i), weight_kg=80.0,
+                   body_fat_pct=17.0, lean_kg=campaign.LEAN_FLOOR_KG - 0.6,
+                   campaign_week=11)
+            for i in range(transform.MIN_WEIGHINS_FOR_FLAGS)]
     assert transform.build_weekly(rows, [])[0]["lean_floor_breach"] is True
 
 
@@ -142,8 +144,10 @@ def test_lean_floor_not_breached_above_the_floor():
     """Derived from campaign.LEAN_FLOOR_KG, not hard-coded: the real floor lives
     in the gitignored campaign.toml, so a literal here fails on a fresh clone
     that only has campaign.example.toml."""
-    rows = [_daily(date="2026-11-02", weight_kg=80.0, body_fat_pct=15.0,
-                   lean_kg=campaign.LEAN_FLOOR_KG + 1.0, campaign_week=11)]
+    rows = [_daily(date="2026-11-0%d" % (2 + i), weight_kg=80.0,
+                   body_fat_pct=15.0, lean_kg=campaign.LEAN_FLOOR_KG + 1.0,
+                   campaign_week=11)
+            for i in range(transform.MIN_WEIGHINS_FOR_FLAGS)]
     assert transform.build_weekly(rows, [])[0]["lean_floor_breach"] is False
 
 
@@ -157,8 +161,10 @@ def test_thin_week_reports_its_weighin_count():
 
 def test_losing_faster_than_cap_is_flagged():
     """Above 0.6 kg/week costs lean mass — the plan says loosen."""
-    rows = [_daily(date="2026-11-16", weight_kg=81.0, campaign_week=13),
-            _daily(date="2026-11-23", weight_kg=80.1, campaign_week=14)]
+    rows = ([_daily(date="2026-11-1%d" % (6 + i), weight_kg=81.0,
+                    campaign_week=13) for i in range(4)]
+            + [_daily(date="2026-11-2%d" % (3 + i), weight_kg=80.1,
+                      campaign_week=14) for i in range(4)])
     weeks = transform.build_weekly(rows, [])
     assert weeks[1]["losing_too_fast"] is True
 

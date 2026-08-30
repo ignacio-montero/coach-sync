@@ -69,6 +69,21 @@ def weighed(week: int, offset: int, weight: float, bf: float | None = None) -> d
                      body_fat_pct=bf if bf is not None else "", lean_kg=lean)
 
 
+def weighed_week(week: int, weight: float, bf: float | None = None,
+                 n: int | None = None) -> list:
+    """A week of identical readings, thick enough for the flags to engage.
+
+    build_weekly blanks its judgement flags when a week has fewer than
+    MIN_WEIGHINS_FOR_FLAGS weigh-ins — a single reading carries +/-1 kg of
+    scale noise and must not trigger a lean-floor breach. Tests that exercise
+    flag LOGIC therefore need a realistic week behind them; use this rather
+    than a lone row, and derive `n` from the constant so the two cannot drift.
+    """
+    from coach_sync import transform
+    n = n if n is not None else transform.MIN_WEIGHINS_FOR_FLAGS
+    return [weighed(week, i, weight, bf) for i in range(n)]
+
+
 def watch_session(week: int, offset: int, kind: str = "STRENGTH_TRAINING") -> dict:
     """A `parse_exercise`-shaped session row, as build_weekly consumes it."""
     return {"date": day_in_week(week, offset).isoformat(),

@@ -17,16 +17,24 @@ from datetime import date
 from pathlib import Path
 
 from . import campaign, hevy, transform
-from .auth import get_access_token
+from .auth import get_access_token, load_env
 from .datatypes import REGISTRY
 from .extract import extract_all, latest_raw
 
 ROOT = Path(__file__).resolve().parent.parent
 RAW_DIR = ROOT / "data" / "raw"
 OUT_DIR = ROOT / "data"
+# Hand-entered ground truth lives OUTSIDE data/. data/ is derived and
+# regenerable — a clean rebuild, or a container started against an empty
+# volume, would destroy the waist history, which no API can recover.
+INPUT_DIR = ROOT / "input"
+
+# How stale the newest data may be before `build` treats it as a failure.
+MAX_DATA_AGE_DAYS = 2
 
 
 def cmd_fetch(args):
+    load_env(ROOT / ".env")
     since = (date.fromisoformat(args.since) if args.since
              else campaign.CAMPAIGN_START)
     print("Fetching from {} ...".format(since.isoformat()))
@@ -137,7 +145,13 @@ def cmd_build(args):
     else:
         print("  {:32s} no raw file - is HEVY_API_KEY set?".format("hevy"))
 
-    manual = transform.read_manual(OUT_DIR / "manual.csv")
+    manual_path = INPUT_DIR / "manual.csv"
+    legacy = OUT_DIR / "manual.csv"
+    if legacy.exists() and not manual_path.exists():
+        INPUT_DIR.mkdir(parents=True, exist_ok=True)
+        legacy.rename(manual_path)
+        print("  moved manual.csv out of the regenerable data/ dir -> input/")
+    manual = transform.read_manual(manual_path)
     if manual:
         print("  {:32s} {:4d} manual entries".format("manual.csv", len(manual)))
 
@@ -172,6 +186,14 @@ def cmd_build(args):
     print("\nWrote {} daily rows, {} weekly rows, {} sessions -> {}".format(
         len(daily), len(weekly), len(sessions), OUT_DIR))
 
+    # C3: staleness must be MACHINE-visible, not just readable. `build` runs
+    # against whatever raw files exist, so a failed fetch produces a perfectly
+    # well-formed CSV of yesterday's data and exits 0. The columns alone do not
+    # help — nobody reads the CSV daily. A non-zero exit is what a container
+    # can alert on.
+    stale_days = transform.staleness_days(weekly)
+    data_through = weekly[-1]["data_through"] if weekly else ""
+
     for row in weekly:
         print("\n  {} ({})  {}".format(row["week"], row["phase"],
                                        row["benchmark"] or ""))
@@ -185,6 +207,22 @@ def cmd_build(args):
         if row["waist_navel_cm"]:
             print("    waist (navel)  : {} cm  (vs baseline {})".format(
                 row["waist_navel_cm"], row["waist_delta_cm"]))
+
+    if stale_days is None:
+        print("\n!! NO DATED DATA AT ALL — nothing was parsed.")
+        return 3
+    if stale_days > MAX_DATA_AGE_DAYS:
+        print("\n" + "=" * 60)
+        print("!! STALE DATA — newest record is {} days old ({}).".format(
+            stale_days, data_through))
+        print("   The CSVs were written, but they describe the past. This")
+        print("   almost always means `fetch` failed and `build` ran against")
+        print("   old raw files. Check credentials first: an OAuth refresh")
+        print("   token that has expired takes out the Hevy fetch too.")
+        print("=" * 60)
+        return 4
+
+    print("\n  data through {} ({} day(s) old)".format(data_through, stale_days))
     return 0
 
 

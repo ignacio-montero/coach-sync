@@ -30,7 +30,23 @@ def _load_dotenv(path: Path) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        key = key.strip()
+        if key.startswith("export "):        # tolerate `export FOO=bar`
+            key = key[len("export "):].strip()
+        value = value.strip().strip('"').strip("'")
+        # setdefault alone would honour an EXISTING EMPTY variable — and Docker
+        # Compose sets one for `environment: - HEVY_API_KEY` with no value, or
+        # an env_file line `HEVY_API_KEY=`. The result was a silently skipped
+        # Hevy fetch and last week's workouts reported as this week's.
+        if not os.environ.get(key):
+            os.environ[key] = value
+
+
+def load_env(env_file: Path) -> None:
+    """Load .env once, explicitly. Previously this happened as a side effect of
+    get_access_token, so the Hevy key was only present because auth ran first —
+    reordering two lines in the CLI would have silently disabled lifting data."""
+    _load_dotenv(env_file)
 
 
 def get_access_token(env_file: Path = Path(".env")) -> str:

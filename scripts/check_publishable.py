@@ -30,6 +30,8 @@ BLOCKED_PATHS = [
     # "*.csv|*.json" on purpose: a .txt or .xlsx export dropped in there is
     # health data too.
     (re.compile(rb"(^|/)data/(?!\.gitkeep$)."), "personal health data directory"),
+    (re.compile(rb"(^|/)input/(?!manual\.example\.csv$)."),
+     "hand-entered health data"),
     (re.compile(rb"(^|/)Takeout/"), "raw health export"),
     (re.compile(rb"(^|/)my-coach/"), "coaching content (personal profile)"),
     (re.compile(rb"(^|/)build/"), "intake notes (personal profile)"),
@@ -80,6 +82,10 @@ ALLOWLIST = {
     "scripts/check_publishable.py",
     "PUBLISHING.md",
     "PRIVACY.md",
+    # A template documenting the column names, with invented values. The
+    # headers are what the rule matches on, and they have to be visible for
+    # the file to serve its purpose.
+    "input/manual.example.csv",
 }
 
 

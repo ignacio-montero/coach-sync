@@ -62,9 +62,15 @@ Interpolating it would launder a gap into a measurement.
 
 ```bash
 uv venv --python 3.12 && uv pip install httpx
-cp .env.example .env                      # credentials
-cp campaign.example.toml campaign.toml    # targets and thresholds
+cp .env.example .env                          # credentials
+cp campaign.example.toml campaign.toml        # targets and thresholds
+cp input/manual.example.csv input/manual.csv  # hand-measured inputs
 ```
+
+`input/` holds measurements no API can supply — a tape measure, essentially.
+It is deliberately outside `data/`, which is derived and regenerable: a clean
+rebuild, or a container started against an empty volume, would otherwise
+destroy the only copy.
 
 Requires a Google Cloud project with the Google Health API enabled, and a Hevy
 Pro subscription for the lifting data.

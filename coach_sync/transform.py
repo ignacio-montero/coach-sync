@@ -240,7 +240,29 @@ def parse_scalar(name: str, points: List[dict]) -> Tuple[Dict[date, float], int]
     return out, unparsed
 
 
+# Below this, a sleep record is a nap or a fragment, not the night.
+MIN_NIGHT_HOURS = 3.0
+
+# A "7-day rolling mean" over fewer readings than this is not one. Daily runs
+# mean every week is partial until Sunday, so this is the normal case, not the
+# exception: without it, a single Monday weigh-in produces a lean-floor breach
+# and a rate breach simultaneously, off one reading with +/-1 kg of noise.
+MIN_WEIGHINS_FOR_FLAGS = 4
+
+
 def parse_sleep(points: List[dict]) -> Tuple[Dict[date, dict], int]:
+    """-> ({night: {...}}, unparsed_count).
+
+    Records are ACCUMULATED per night, not overwritten. Fitbit routinely logs
+    fragmented sleep (23:00-00:50 then 01:30-07:30) and daytime naps. A plain
+    `out[night] = ...` meant the last record written won, so a 40-minute nap
+    replaced an 8-hour night and `sleep_7d_mean_h` dropped by more than an hour
+    from one afternoon. Which record won also depended on API return order, so
+    it was not even deterministic across re-runs.
+
+    Nights sum; anything under MIN_NIGHT_HOURS is counted separately as a nap
+    so it never displaces the night it shares a date with.
+    """
     out: Dict[date, dict] = {}
     unparsed = 0
     for point in points:
@@ -267,7 +289,26 @@ def parse_sleep(points: List[dict]) -> Tuple[Dict[date, dict], int]:
         # belongs to the PREVIOUS day's night. Without this, half the week's
         # sleep lands on the wrong date and the 7-day window is misaligned.
         night = start.date() if start.hour >= 18 else start.date() - timedelta(days=1)
-        out[night] = {"sleep_hours": hours, "sleep_bedtime": start.strftime("%H:%M")}
+        entry = out.setdefault(
+            night, {"sleep_hours": 0.0, "sleep_bedtime": "", "nap_hours": 0.0,
+                    "_earliest": None})
+
+        is_nap = hours is not None and hours < MIN_NIGHT_HOURS and 6 <= start.hour < 18
+        if is_nap:
+            entry["nap_hours"] = round(entry["nap_hours"] + (hours or 0), 2)
+            continue
+
+        entry["sleep_hours"] = round(entry["sleep_hours"] + (hours or 0), 2)
+        # Bedtime is the START of the night, so the earliest segment wins —
+        # otherwise a 03:00 wake-and-return fragment reports as the bedtime.
+        if entry["_earliest"] is None or start < entry["_earliest"]:
+            entry["_earliest"] = start
+            entry["sleep_bedtime"] = start.strftime("%H:%M")
+
+    for entry in out.values():
+        entry.pop("_earliest", None)
+        if entry["sleep_hours"] == 0.0:
+            entry["sleep_hours"] = None
     return out, unparsed
 
 
@@ -350,13 +391,21 @@ def read_manual(path: Path) -> Dict[date, dict]:
     if not path.exists():
         return {}
     out: Dict[date, dict] = {}
-    with path.open() as handle:
+    skipped = 0
+    # utf-8-sig: Excel and Google Sheets write a BOM on "Download as CSV",
+    # which makes the first header "\ufeffdate". Every row then missed on
+    # KeyError and read_manual returned {} — silently erasing the entire waist
+    # history, the one input with no unparsed counter behind it.
+    with path.open(encoding="utf-8-sig", newline="") as handle:
         for row in csv.DictReader(handle):
             try:
                 day = date.fromisoformat(row["date"])
-            except (ValueError, KeyError):
+            except (ValueError, KeyError, TypeError):
+                skipped += 1
                 continue
             out[day] = {k: v for k, v in row.items() if k != "date" and v}
+    if skipped:
+        print("  ! {}: skipped {} unreadable row(s)".format(path.name, skipped))
     return out
 
 
@@ -370,7 +419,7 @@ def window(mapping: dict, start: date, end: date) -> dict:
 
 DAILY_COLUMNS = [
     "date", "weight_kg", "body_fat_pct", "lean_kg", "resting_hr",
-    "hrv_rmssd", "sleep_hours", "sleep_bedtime", "campaign_week",
+    "hrv_rmssd", "sleep_hours", "sleep_bedtime", "nap_hours", "campaign_week",
 ]
 
 WEEKLY_COLUMNS = [
@@ -380,7 +429,7 @@ WEEKLY_COLUMNS = [
     "rhr_7d_mean", "rhr_elevated", "hrv_7d_mean",
     "sleep_7d_mean_h", "weighins_count", "sessions_done", "losing_too_fast",
     "waist_navel_cm", "waist_delta_cm", "a1_done", "a2_done",
-    "weeks_since_previous", "weekly_rate_kg",
+    "weeks_since_previous", "weekly_rate_kg", "week_is_thin",
     "data_through", "built_at",
 ]
 
@@ -416,6 +465,7 @@ def build_daily(parsed: Dict[str, Any]) -> List[dict]:
             "hrv_rmssd": parsed.get("daily_heart_rate_variability", {}).get(day, ""),
             "sleep_hours": sleep.get("sleep_hours", "") or "",
             "sleep_bedtime": sleep.get("sleep_bedtime", "") or "",
+            "nap_hours": sleep.get("nap_hours", "") or "",
             "campaign_week": campaign.week_number(day) or "",
         })
     return rows
@@ -472,6 +522,8 @@ def build_weekly(daily: List[dict], sessions: List[dict],
 
         weights = col(rows, "weight_kg")
         weight_mean = mean(weights)
+        n_weighins = sum(1 for w in weights if w is not None)
+        thin = n_weighins < MIN_WEIGHINS_FOR_FLAGS
         bf_mean = mean(col(rows, "body_fat_pct"))
         lean_mean = mean(col(rows, "lean_kg"))
         rhr_mean = mean(col(rows, "resting_hr"))
@@ -521,8 +573,12 @@ def build_weekly(daily: List[dict], sessions: List[dict],
             # The one rule that overrides everything else in the campaign —
             # and therefore the one that must never read "fine" because it had
             # nothing to check. "" means UNKNOWN and is not the same as False.
+            # Blank on a thin week: the flag is a JUDGEMENT, and there is not
+            # enough data to make one. The mean itself is still reported —
+            # weighins_count says how much to trust it.
             "lean_floor_breach": (
-                "" if lean_mean is None else lean_mean < campaign.LEAN_FLOOR_KG
+                "" if (lean_mean is None or thin)
+                else lean_mean < campaign.LEAN_FLOOR_KG
             ),
             "checkpoint_target": target if target is not None else "",
             "delta_vs_target": (
@@ -538,12 +594,13 @@ def build_weekly(daily: List[dict], sessions: List[dict],
             "sleep_7d_mean_h": mean(col(rows, "sleep_hours")) or "",
             # A "7-day mean" over two readings is not a 7-day mean. Surfacing the
             # count keeps a thin week visible instead of silently confident.
-            "weighins_count": sum(1 for w in weights if w is not None),
+            "weighins_count": n_weighins,
+            "week_is_thin": thin,
             "sessions_done": sessions_by_week.get(week, 0),
             "weekly_rate_kg": rate_per_week if rate_per_week is not None else "",
             # Judged on the per-week RATE, never the raw multi-week delta.
             "losing_too_fast": (
-                "" if rate_per_week is None
+                "" if (rate_per_week is None or thin)
                 else rate_per_week < -campaign.MAX_SAFE_LOSS_KG_PER_WEEK
             ),
             # Goal 3 is "reduce waist against the week-1 baseline", so the
@@ -581,6 +638,20 @@ def _existing_substance(path: Path) -> tuple:
             return _substance(list(csv.DictReader(handle)))
     except OSError:
         return (0, 0)
+
+
+def staleness_days(weekly: List[dict], today: Optional[date] = None) -> Optional[int]:
+    """How old the newest record is, or None if nothing is dated.
+
+    Pulled out of the CLI so it can be tested without faking a filesystem or a
+    clock: `today` is injectable precisely so the stale branch is reachable in
+    a test. An untestable safety check tends to be an untested one.
+    """
+    today = today or date.today()
+    dated = [row["data_through"] for row in weekly if row.get("data_through")]
+    if not dated:
+        return None
+    return (today - date.fromisoformat(max(dated))).days
 
 
 def write_csv(path: Path, columns: List[str], rows: List[dict],
