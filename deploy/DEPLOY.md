@@ -10,11 +10,11 @@ prepared and verified locally; the deploy itself is a human-gated action.
 
 ## 0 · Shape of the service, in one paragraph
 
-A single Python container with **no published ports**. It wakes at **06:30
+A single Python container with **no published ports**. It wakes at **13:00
 Europe/London**, runs `fetch` (Google Health + Hevy → raw JSON) then `build`
 (raw → four CSVs), prunes old raw captures, and goes back to sleep. Failures
 go to **Telegram** and flip the container's **healthcheck**. Persistent state
-lives in **host bind mounts under `/srv/coach-sync`**, not in Docker volumes.
+lives in **host bind mounts under `/home/nacho/coach-sync`**, not in Docker volumes.
 Steady-state cost: ~15 MB RSS asleep, a few seconds of CPU a day, ~6 MB of disk.
 
 | | |
@@ -22,9 +22,9 @@ Steady-state cost: ~15 MB RSS asleep, a few seconds of CPU a day, ~6 MB of disk.
 | Image | `ghcr.io/ignacio-montero/coach-sync:0.1.0` (private, amd64, pinned) |
 | Ports | **none** — outbound HTTPS only |
 | RAM | `mem_limit: 192m` (measured peak < 64 MB) |
-| Disk | ~6–7 MB steady state under `/srv/coach-sync` |
+| Disk | ~6–7 MB steady state under `/home/nacho/coach-sync` |
 | Secrets | `~/homelab/services/coach-sync/.env` on the server (untracked) |
-| Data | `/srv/coach-sync/{data,input,config}` bind mounts |
+| Data | `/home/nacho/coach-sync/{data,input,config}` bind mounts |
 | Alerting | Telegram (`sendMessage` only) + Docker healthcheck |
 
 ---
@@ -75,10 +75,10 @@ docker buildx build --platform linux/amd64 \
 
 ```bash
 ssh homelab '
-  sudo mkdir -p /srv/coach-sync/data/raw /srv/coach-sync/data/state \
-                /srv/coach-sync/input /srv/coach-sync/config
-  sudo chown -R 1000:1000 /srv/coach-sync
-  sudo chmod 750 /srv/coach-sync/input /srv/coach-sync/config
+  sudo mkdir -p /home/nacho/coach-sync/data/raw /home/nacho/coach-sync/data/state \
+                /home/nacho/coach-sync/input /home/nacho/coach-sync/config
+  sudo chown -R 1000:1000 /home/nacho/coach-sync
+  sudo chmod 750 /home/nacho/coach-sync/input /home/nacho/coach-sync/config
   id -un 1000    # sanity: should print nacho
 '
 ```
@@ -102,10 +102,10 @@ scp ~/Development/Personal-trainer/pipeline/input/manual.csv \
     homelab:/tmp/manual.csv
 
 ssh homelab '
-  sudo mv /tmp/campaign.toml /srv/coach-sync/config/campaign.toml
-  sudo mv /tmp/manual.csv    /srv/coach-sync/input/manual.csv
-  sudo chown 1000:1000 /srv/coach-sync/config/campaign.toml /srv/coach-sync/input/manual.csv
-  sudo chmod 640 /srv/coach-sync/config/campaign.toml /srv/coach-sync/input/manual.csv
+  sudo mv /tmp/campaign.toml /home/nacho/coach-sync/config/campaign.toml
+  sudo mv /tmp/manual.csv    /home/nacho/coach-sync/input/manual.csv
+  sudo chown 1000:1000 /home/nacho/coach-sync/config/campaign.toml /home/nacho/coach-sync/input/manual.csv
+  sudo chmod 640 /home/nacho/coach-sync/config/campaign.toml /home/nacho/coach-sync/input/manual.csv
 '
 ```
 
@@ -122,8 +122,8 @@ required. If you want the box to start from what the Mac already has:
 
 ```bash
 rsync -av ~/Development/Personal-trainer/pipeline/data/ homelab:/tmp/coach-data/
-ssh homelab 'sudo rsync -a /tmp/coach-data/ /srv/coach-sync/data/ \
-             && sudo chown -R 1000:1000 /srv/coach-sync/data && rm -rf /tmp/coach-data'
+ssh homelab 'sudo rsync -a /tmp/coach-data/ /home/nacho/coach-sync/data/ \
+             && sudo chown -R 1000:1000 /home/nacho/coach-sync/data && rm -rf /tmp/coach-data'
 ```
 
 This also arms the **shrink guard**: `build` refuses to replace a CSV with one
@@ -170,9 +170,9 @@ ssh homelab 'cd ~/homelab && git pull && docker compose pull coach-sync && docke
 ```
 
 Nothing here touches networking, the firewall, SSH or disks beyond creating
-`/srv/coach-sync`. **Rollback for the whole thing:**
+`/home/nacho/coach-sync`. **Rollback for the whole thing:**
 `ssh homelab 'cd ~/homelab && docker compose down coach-sync'` — which leaves
-`/srv/coach-sync` untouched, so no data is lost.
+`/home/nacho/coach-sync` untouched, so no data is lost.
 
 ---
 
@@ -181,10 +181,10 @@ Nothing here touches networking, the firewall, SSH or disks beyond creating
 ```bash
 # 1. It started, and CATCH_UP fired an immediate first run.
 ssh homelab 'docker logs --tail 40 coach-sync'
-#    expect: "starting — daily at 06:30 Europe/London"
-#            "no successful run since the last 06:30 slot — running now (catch-up)"
+#    expect: "starting — daily at 13:00 Europe/London"
+#            "no successful run since the last 13:00 slot — running now (catch-up)"
 #            a run: fetch ... build ... "cycle OK in Ns"
-#            "sleeping N.Nh until <tomorrow> 06:30 BST"
+#            "sleeping N.Nh until <tomorrow> 13:00 BST"
 
 # 2. The timestamps say BST/GMT, not UTC. If they say UTC, TZ was dropped and
 #    the container should have refused to start — investigate before continuing.
@@ -195,7 +195,7 @@ ssh homelab 'docker ps --filter name=coach-sync --format "{{.Image}}  {{.Status}
 #    (healthy can take up to ~5 min — the healthcheck interval)
 
 # 4. The four CSVs exist, are owned by 1000, and are non-trivial.
-ssh homelab 'ls -la /srv/coach-sync/data/*.csv && wc -l /srv/coach-sync/data/*.csv'
+ssh homelab 'ls -la /home/nacho/coach-sync/data/*.csv && wc -l /home/nacho/coach-sync/data/*.csv'
 
 # 5. It publishes nothing. This is the one that protects the health data.
 ssh homelab 'docker port coach-sync || echo "no published ports — correct"'
@@ -223,9 +223,9 @@ cd ~/Development/homelab && ./scripts/snapshot.sh
 
 | Path (host) | Mount | Contents | If lost |
 |---|---|---|---|
-| `/srv/coach-sync/data` | `/app/data` rw | 4 CSVs + `raw/` landing zone + `state/heartbeat.json` | **Recoverable** — re-fetch and rebuild |
-| `/srv/coach-sync/input` | `/app/input` **ro** | `manual.csv` — hand-measured waist | **GONE FOREVER** |
-| `/srv/coach-sync/config` | `/app/config` **ro** | `campaign.toml` | Recoverable from the Mac |
+| `/home/nacho/coach-sync/data` | `/app/data` rw | 4 CSVs + `raw/` landing zone + `state/heartbeat.json` | **Recoverable** — re-fetch and rebuild |
+| `/home/nacho/coach-sync/input` | `/app/input` **ro** | `manual.csv` — hand-measured waist | **GONE FOREVER** |
+| `/home/nacho/coach-sync/config` | `/app/config` **ro** | `campaign.toml` | Recoverable from the Mac |
 
 ### How `manual.csv` is protected — three independent layers
 
@@ -244,7 +244,7 @@ Back it up anyway — three layers of protection against software are zero
 protection against a dead SSD:
 
 ```bash
-ssh homelab 'sudo tar czf - /srv/coach-sync/input /srv/coach-sync/config' \
+ssh homelab 'sudo tar czf - /home/nacho/coach-sync/input /home/nacho/coach-sync/config' \
   > ~/Backups/coach-sync-inputs-$(date +%F).tgz
 ```
 
@@ -270,7 +270,7 @@ Mac**; nothing needs to be installed on the box.
 
 ```bash
 # at home (LAN alias) — use homelab-ts when away
-rsync -av homelab:/srv/coach-sync/data/*.csv \
+rsync -av homelab:/home/nacho/coach-sync/data/*.csv \
           ~/.claude/skills/marta-ibanez/references/data/
 ```
 
@@ -302,7 +302,7 @@ ssh homelab 'cd ~/homelab && git pull && docker compose pull coach-sync && docke
 
 **Yes, at 0.1.0 — and the reason is structural, not luck.** This service has no
 database and runs no migrations. The CSVs are *derived*: every run rebuilds
-them from the raw JSON, so an older image reading the same `/srv/coach-sync`
+them from the raw JSON, so an older image reading the same `/home/nacho/coach-sync`
 produces its own correct output. Recreating the container does not touch the
 bind mounts.
 
@@ -341,8 +341,8 @@ Useful one-liners:
 ```bash
 ssh homelab 'docker logs --tail 80 coach-sync'
 ssh homelab 'docker inspect -f "{{.State.Health.Status}}" coach-sync'
-ssh homelab 'cat /srv/coach-sync/data/state/heartbeat.json'   # last attempt/success/exit code
-# force a run now, without waiting for 06:30 (safe: the job is idempotent)
+ssh homelab 'cat /home/nacho/coach-sync/data/state/heartbeat.json'   # last attempt/success/exit code
+# force a run now, without waiting for 13:00 (safe: the job is idempotent)
 ssh homelab 'docker exec coach-sync python -m coach_sync.scheduler --run-once'
 ```
 

@@ -44,7 +44,8 @@ services:
       # change a no-op instead of an edit.
       TZ: "Europe/London"
 
-      RUN_AT: "06:30"                # after the morning weigh-in, before the day
+      RUN_AT: "13:00"                # midday: the morning weigh-in has landed,
+                                     # and the Mac is likely awake for the rsync
       # Real targets/thresholds are personal health data: never in the image,
       # never in git. Mounted read-only from the server (see volumes).
       COACH_SYNC_CAMPAIGN_CONFIG: "/app/config/campaign.toml"
@@ -60,6 +61,12 @@ services:
       ALERT_INCLUDE_OUTPUT: "false"
       NOTIFY_ON_SUCCESS: "false"     # flip to "true" for a week if you want proof of life
 
+    # Host path, not a named volume, and deliberately under the user's home:
+    #   - `docker compose down -v` / `volume prune` cannot reach a bind mount,
+    #     and input/manual.csv is hand-entered and irreplaceable.
+    #   - uid 1000 (nacho) owns ~ already, so no chown and no root needed.
+    #   - rsync to the Mac reads a normal home path, not root-owned
+    #     /var/lib/docker/volumes.
     volumes:
       # BIND MOUNTS, not named volumes — three reasons, in order of importance:
       #
@@ -73,14 +80,14 @@ services:
       # 2. The Mac pulls the CSVs with rsync over Tailscale (ARCHITECTURE.md
       #    D-013). A host path is rsync-able as user nacho; a named volume lives
       #    under root-owned /var/lib/docker/volumes and needs sudo gymnastics.
-      # 3. Backups are `cp -a /srv/coach-sync` — no Docker involved.
+      # 3. Backups are `cp -a /home/nacho/coach-sync` — no Docker involved.
       #
       # Ownership: the container runs as uid 1000, which is `nacho` on the box,
-      # so `sudo chown -R 1000:1000 /srv/coach-sync` once is all the setup there
+      # so `sudo chown -R 1000:1000 /home/nacho/coach-sync` once is all the setup there
       # is (bind mounts pass host ownership straight through — no uid mapping).
-      - /srv/coach-sync/data:/app/data          # CSVs + raw landing zone (rw)
-      - /srv/coach-sync/input:/app/input:ro     # ⚠️ IRREPLACEABLE hand-entered data
-      - /srv/coach-sync/config:/app/config:ro   # campaign.toml (real targets)
+      - /home/nacho/coach-sync/data:/app/data          # CSVs + raw landing zone (rw)
+      - /home/nacho/coach-sync/input:/app/input:ro     # ⚠️ IRREPLACEABLE hand-entered data
+      - /home/nacho/coach-sync/config:/app/config:ro   # campaign.toml (real targets)
 
     # Measured: the heaviest path (parse a full Hevy dump + a week of sleep,
     # rebuild all four CSVs) peaks under 64 MB — it completed inside a 64 MB
@@ -114,5 +121,5 @@ services:
     # `docker ps` therefore becomes a second alerting channel alongside Telegram.
 
 # No `volumes:` block and no `ports:` — this service publishes nothing and owns
-# no named volumes. Its persistent state is entirely under /srv/coach-sync on
+# no named volumes. Its persistent state is entirely under /home/nacho/coach-sync on
 # the host, which is deliberately outside Docker's lifecycle.

@@ -20,7 +20,11 @@ SCOPE_METRICS = "https://www.googleapis.com/auth/googlehealth.health_metrics_and
 SCOPE_SLEEP = "https://www.googleapis.com/auth/googlehealth.sleep.readonly"
 SCOPE_ACTIVITY = "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly"
 
-ALL_SCOPES = [SCOPE_METRICS, SCOPE_SLEEP, SCOPE_ACTIVITY]
+# Write access, and ONLY to files this app created — not the account's other
+# spreadsheets. Needed to publish the Sheet a Claude Project reads.
+SCOPE_DRIVE_FILE = "https://www.googleapis.com/auth/drive.file"
+
+ALL_SCOPES = [SCOPE_METRICS, SCOPE_SLEEP, SCOPE_ACTIVITY, SCOPE_DRIVE_FILE]
 
 
 @dataclass(frozen=True)

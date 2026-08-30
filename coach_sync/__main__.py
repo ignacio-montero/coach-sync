@@ -16,7 +16,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from . import campaign, hevy, transform
+from . import campaign, hevy, sheets, transform
 from .auth import get_access_token, load_env
 from .clock import today as london_today
 from .datatypes import REGISTRY
@@ -196,6 +196,23 @@ def cmd_build(args):
     # well-formed CSV of yesterday's data and exits 0. The columns alone do not
     # help — nobody reads the CSV daily. A non-zero exit is what a container
     # can alert on.
+    # Publish to the Sheet so a Claude Project can read it. Deliberately AFTER
+    # the CSVs are written and BEFORE the staleness verdict: a Sheet failure
+    # must not stop the local files being correct, and must not mask a stale
+    # exit code either.
+    if sheets.configured():
+        try:
+            token = get_access_token(ROOT / ".env")
+            sheet_id = sheets.publish(token, OUT_DIR,
+                                      os.environ.get("COACH_SYNC_SHEET_ID"))
+            if not os.environ.get("COACH_SYNC_SHEET_ID"):
+                print("\n  !! Save this to .env so the sheet is reused:")
+                print("     COACH_SYNC_SHEET_ID={}".format(sheet_id))
+        except (RuntimeError, SystemExit) as exc:
+            # Not fatal. The CSVs are the source of truth; the Sheet is a
+            # convenience mirror for the Project.
+            print("  !! sheet publish failed (CSVs are still correct): {}".format(exc))
+
     stale_days = transform.staleness_days(weekly)
     data_through = weekly[-1]["data_through"] if weekly else ""
 
