@@ -287,8 +287,10 @@ def test_the_full_build_over_real_captures_produces_a_coherent_weekly_report(
         assert 1 <= n <= campaign.TOTAL_WEEKS
         assert row["week_start"] <= row["week_end"]
         assert 0 <= row["weighins_count"] <= 7
-        assert isinstance(row["lean_floor_breach"], bool)
-        assert isinstance(row["losing_too_fast"], bool)
+        # Tri-state by design: True / False / "" for UNKNOWN. A flag that had
+        # nothing to check must not render as a confident False.
+        assert row["lean_floor_breach"] in (True, False, "")
+        assert row["losing_too_fast"] in (True, False, "")
         assert row["sessions_done"] >= 0
         if row["weight_7d_mean"] != "":
             assert 40.0 < row["weight_7d_mean"] < 200.0

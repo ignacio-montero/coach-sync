@@ -58,10 +58,7 @@ def test_BUG_weight_delta_is_a_one_week_delta_even_across_a_gap():
     assert w4["weight_delta_kg"] == "" or w4["weight_delta_kg"] > -0.6
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG: same root cause — losing_too_fast is derived from the gap-spanning "
-    "delta, so it false-positives after every travel block."))
-def test_BUG_losing_too_fast_does_not_fire_on_a_gap_spanning_delta():
+def test_losing_too_fast_does_not_fire_on_a_gap_spanning_delta():
     rows = [weighed(1, 0, 84.0), weighed(4, 0, 82.4)]
     assert transform.build_weekly(rows, [])[1]["losing_too_fast"] is False
 
@@ -143,12 +140,7 @@ def test_lean_floor_uses_the_weekly_mean_not_a_single_bad_day():
     assert w["lean_floor_breach"] is False
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG: lean_floor_breach is False when lean mass is UNKNOWN (weight logged "
-    "but no body-fat reading that week). False is indistinguishable from "
-    "'checked, fine' in the CSV. This is the false negative the PRD calls the "
-    "worst bug in the system."))
-def test_BUG_lean_floor_breach_is_not_a_confident_false_when_lean_is_unknown():
+def test_lean_floor_breach_is_not_a_confident_false_when_lean_is_unknown():
     """The scale reports weight and BF% from the same step-on, but BF% is the
     flakier of the two and a travel week can produce weight-only rows."""
     w = week([weighed(11, 0, 80.0)])          # weight, no body fat
@@ -174,11 +166,7 @@ def test_sessions_are_counted_into_the_week_they_fall_in():
     assert weeks[0]["sessions_done"] == 2
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG: build_weekly derives its week list from `daily` only. A week with "
-    "training but no biometrics (travel, flat scale battery, BF sensor sulking) "
-    "produces NO weekly row, so the sessions vanish from adherence entirely."))
-def test_BUG_a_week_with_training_but_no_weigh_ins_still_reports_its_sessions():
+def test_a_week_with_training_but_no_weigh_ins_still_reports_its_sessions():
     rows = [weighed(1, 0, 84.0)]                      # W1 only
     sessions = [watch_session(2, 0), watch_session(2, 3)]   # trained in W2
     weeks = transform.build_weekly(rows, sessions)

@@ -186,12 +186,7 @@ def test_weight_uses_the_local_day_not_the_utc_day():
     assert list(values) == [date(2026, 8, 30)]
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG: parse_scalar's docstring says it keeps the FIRST reading of a day to "
-    "protect the morning-weigh-in protocol, but the live API returns points "
-    "NEWEST-FIRST, so on a two-weigh-in day the EVENING reading wins. Evening "
-    "weight runs ~0.5-1.5 kg high; this silently inflates weight_7d_mean."))
-def test_BUG_two_weigh_ins_in_a_day_keeps_the_morning_one():
+def test_two_weigh_ins_in_a_day_keeps_the_morning_one():
     """Points supplied in the order the live API returns them: newest first."""
     values, _ = transform.parse_scalar("weight", [
         weight_point("2026-08-30T20:10:00Z", 85200),   # 21:10 local, after dinner

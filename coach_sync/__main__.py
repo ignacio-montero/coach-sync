@@ -145,22 +145,29 @@ def cmd_build(args):
     weekly = transform.build_weekly(daily, sessions + gym_as_sessions(gym), manual)
     annotate_anchors(weekly, gym)
 
-    transform.write_csv(OUT_DIR / "metrics_daily.csv", transform.DAILY_COLUMNS, daily)
-    transform.write_csv(OUT_DIR / "metrics_weekly.csv", transform.WEEKLY_COLUMNS, weekly)
-    transform.write_csv(
-        OUT_DIR / "lifts.csv",
-        ["date", "start_time", "workout_id", "workout_title", "slot", "exercise",
-         "set_index", "set_type", "weight_kg", "reps", "rpe", "is_top_set",
-         "est_1rm_epley"],
-        lifts,
-    )
-    transform.write_csv(
-        OUT_DIR / "sessions.csv",
-        ["date", "start_time", "activity", "exercise_type", "slot",
-         "duration_min", "active_zone_minutes", "avg_hr", "recording_method",
-         "calories"],
-        sessions,
-    )
+    allow_shrink = getattr(args, "allow_shrink", False)
+    try:
+        transform.write_csv(OUT_DIR / "metrics_daily.csv",
+                            transform.DAILY_COLUMNS, daily, allow_shrink)
+        transform.write_csv(OUT_DIR / "metrics_weekly.csv",
+                            transform.WEEKLY_COLUMNS, weekly, allow_shrink)
+        transform.write_csv(
+            OUT_DIR / "lifts.csv",
+            ["date", "start_time", "workout_id", "workout_title", "slot",
+             "exercise", "set_index", "set_type", "weight_kg", "reps", "rpe",
+             "is_top_set", "est_1rm_epley"],
+            lifts, allow_shrink,
+        )
+        transform.write_csv(
+            OUT_DIR / "sessions.csv",
+            ["date", "start_time", "activity", "exercise_type", "slot",
+             "duration_min", "active_zone_minutes", "avg_hr",
+             "recording_method", "calories"],
+            sessions, allow_shrink,
+        )
+    except transform.ShrinkGuard as exc:
+        print("\n!! REFUSED TO WRITE\n{}".format(exc))
+        return 2
 
     print("\nWrote {} daily rows, {} weekly rows, {} sessions -> {}".format(
         len(daily), len(weekly), len(sessions), OUT_DIR))
@@ -212,7 +219,10 @@ def main(argv=None):
 
     sub.add_parser("inspect", help="print the real shape of the raw JSON").set_defaults(
         func=cmd_inspect)
-    sub.add_parser("build", help="parse raw -> CSVs").set_defaults(func=cmd_build)
+    p_build = sub.add_parser("build", help="parse raw -> CSVs")
+    p_build.add_argument("--allow-shrink", action="store_true",
+                         help="permit overwriting with less data than before")
+    p_build.set_defaults(func=cmd_build)
 
     args = parser.parse_args(argv)
     return args.func(args)

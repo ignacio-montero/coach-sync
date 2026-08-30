@@ -14,12 +14,17 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import statistics
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from . import campaign
+
+
+class ShrinkGuard(Exception):
+    """Raised when a write would replace good data with less of it."""
 
 # ---------------------------------------------------------------- helpers
 
@@ -158,17 +163,28 @@ def local_datetime(interval_or_sample: dict, key: str = "startTime") -> Optional
     return moment + timedelta(seconds=offset) if offset else moment
 
 
+# A weigh-in before this hour is the tail of the previous night, not a morning
+# measurement. ARCHITECTURE.md section 6: "the first reading after 04:00".
+MORNING_CUTOFF_HOUR = 4
+
+
 def parse_scalar(name: str, points: List[dict]) -> Tuple[Dict[date, float], int]:
     """-> ({date: value}, unparsed_count).
 
-    Weight keeps the FIRST reading of a day: the protocol is one consistent
-    morning weigh-in, and switching that rule mid-campaign would put a step
-    change in the trend line that looks physiological.
+    SAME-DAY SELECTION: when a day has several readings, keep the EARLIEST one
+    at or after 04:00 local. Applied identically to weight and body fat.
+
+    This must not depend on the order the API returns records in. It previously
+    did — the rule was "first encountered wins", and the live API returns
+    newest-first, so the *evening* weigh-in won while body fat (which had no
+    dedup at all, so last-write-won) kept the *morning* one. Lean mass is the
+    product of the two, so it was being computed from measurements twelve hours
+    apart. Response ordering is not part of any contract; sort explicitly.
     """
     from .datatypes import REGISTRY
 
     key = REGISTRY[name].payload_key
-    out: Dict[date, float] = {}
+    candidates: Dict[date, list] = {}
     unparsed = 0
 
     for point in points:
@@ -207,9 +223,19 @@ def parse_scalar(name: str, points: List[dict]) -> Tuple[Dict[date, float], int]
         if day is None or value is None:
             unparsed += 1
             continue
-        if name == "weight" and day in out:
+        # moment may be None for daily-summary types, which have one value per
+        # day and no time — they sort trivially.
+        candidates.setdefault(day, []).append((moment, value))
+
+    out: Dict[date, float] = {}
+    for day, readings in candidates.items():
+        timed = [(m, v) for m, v in readings if m is not None]
+        if not timed:
+            out[day] = readings[0][1]
             continue
-        out[day] = value
+        timed.sort(key=lambda pair: pair[0])
+        morning = [(m, v) for m, v in timed if m.hour >= MORNING_CUTOFF_HOUR]
+        out[day] = (morning or timed)[0][1]
 
     return out, unparsed
 
@@ -354,6 +380,8 @@ WEEKLY_COLUMNS = [
     "rhr_7d_mean", "rhr_elevated", "hrv_7d_mean",
     "sleep_7d_mean_h", "weighins_count", "sessions_done", "losing_too_fast",
     "waist_navel_cm", "waist_delta_cm", "a1_done", "a2_done",
+    "weeks_since_previous", "weekly_rate_kg",
+    "data_through", "built_at",
 ]
 
 
@@ -407,6 +435,13 @@ def build_weekly(daily: List[dict], sessions: List[dict],
         if week:
             sessions_by_week[week] = sessions_by_week.get(week, 0) + 1
 
+    # A week can have training and no biometrics — a flat scale battery, or a
+    # trip with the scale left at home. Deriving the week list from `daily`
+    # alone made that week vanish entirely, taking its sessions out of the
+    # adherence count with nothing to show it had happened.
+    for week in sessions_by_week:
+        by_week.setdefault(week, [])
+
     def col(rows, key):
         out = []
         for r in rows:
@@ -415,6 +450,14 @@ def build_weekly(daily: List[dict], sessions: List[dict],
         return out
 
     manual = manual or {}
+
+    # Staleness must be visible IN the data. Without this, a build over
+    # yesterday's raw files (because `fetch` failed) is indistinguishable from
+    # a fresh one — the numbers look current and are not. This is the exact
+    # silent-staleness failure the whole pipeline exists to prevent.
+    all_dates = [r["date"] for r in daily] + [r["date"] for r in sessions]
+    data_through = max(all_dates) if all_dates else ""
+    built_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     baseline_waist = None
     for day in sorted(manual):
         value = to_float(manual[day].get("waist_navel_cm"))
@@ -422,7 +465,7 @@ def build_weekly(daily: List[dict], sessions: List[dict],
             baseline_waist = value
             break
 
-    weekly, previous_weight = [], None
+    weekly, previous_weight, previous_week = [], None, None
     for week in sorted(by_week):
         rows = by_week[week]
         start, end = campaign.week_bounds(week)
@@ -434,9 +477,21 @@ def build_weekly(daily: List[dict], sessions: List[dict],
         rhr_mean = mean(col(rows, "resting_hr"))
 
         target = campaign.CHECKPOINTS.get(week)
+
+        # The delta is kept whatever the gap — 84.0 -> 83.5 is real information
+        # even if a travel week sits between. What must NOT happen is judging a
+        # multi-week change against a one-week cap: three weeks of safe loss
+        # would read as one week of dangerous loss and the coach would loosen a
+        # deficit that was fine. So the delta is raw, and the RATE is what the
+        # threshold sees.
+        gap = (week - previous_week) if previous_week is not None else None
         delta_prev = (
             round(weight_mean - previous_weight, 2)
             if (weight_mean and previous_weight) else None
+        )
+        rate_per_week = (
+            round(delta_prev / gap, 3)
+            if (delta_prev is not None and gap) else None
         )
 
         benchmark = ""
@@ -458,11 +513,16 @@ def build_weekly(daily: List[dict], sessions: List[dict],
             "benchmark": benchmark,
             "weight_7d_mean": weight_mean if weight_mean is not None else "",
             "weight_delta_kg": delta_prev if delta_prev is not None else "",
+            "weeks_since_previous": gap if gap is not None else "",
+            "data_through": data_through,
+            "built_at": built_at,
             "bf_7d_mean": bf_mean if bf_mean is not None else "",
             "lean_7d_mean": lean_mean if lean_mean is not None else "",
-            # The one rule that overrides everything else in the campaign.
+            # The one rule that overrides everything else in the campaign —
+            # and therefore the one that must never read "fine" because it had
+            # nothing to check. "" means UNKNOWN and is not the same as False.
             "lean_floor_breach": (
-                lean_mean is not None and lean_mean < campaign.LEAN_FLOOR_KG
+                "" if lean_mean is None else lean_mean < campaign.LEAN_FLOOR_KG
             ),
             "checkpoint_target": target if target is not None else "",
             "delta_vs_target": (
@@ -471,7 +531,8 @@ def build_weekly(daily: List[dict], sessions: List[dict],
             ),
             "rhr_7d_mean": rhr_mean if rhr_mean is not None else "",
             "rhr_elevated": (
-                rhr_mean is not None and rhr_mean > campaign.RHR_ELEVATED_THRESHOLD
+                "" if rhr_mean is None
+                else rhr_mean > campaign.RHR_ELEVATED_THRESHOLD
             ),
             "hrv_7d_mean": mean(col(rows, "hrv_rmssd")) or "",
             "sleep_7d_mean_h": mean(col(rows, "sleep_hours")) or "",
@@ -479,9 +540,11 @@ def build_weekly(daily: List[dict], sessions: List[dict],
             # count keeps a thin week visible instead of silently confident.
             "weighins_count": sum(1 for w in weights if w is not None),
             "sessions_done": sessions_by_week.get(week, 0),
+            "weekly_rate_kg": rate_per_week if rate_per_week is not None else "",
+            # Judged on the per-week RATE, never the raw multi-week delta.
             "losing_too_fast": (
-                delta_prev is not None
-                and delta_prev < -campaign.MAX_SAFE_LOSS_KG_PER_WEEK
+                "" if rate_per_week is None
+                else rate_per_week < -campaign.MAX_SAFE_LOSS_KG_PER_WEEK
             ),
             # Goal 3 is "reduce waist against the week-1 baseline", so the
             # delta against that baseline is the number, not the raw value.
@@ -492,13 +555,68 @@ def build_weekly(daily: List[dict], sessions: List[dict],
             ),
         })
         if weight_mean is not None:
-            previous_weight = weight_mean
+            previous_weight, previous_week = weight_mean, week
     return weekly
 
 
-def write_csv(path: Path, columns: List[str], rows: List[dict]) -> None:
+def _substance(rows: List[dict]) -> tuple:
+    """(row count, populated-cell count) — a proxy for how much data is here.
+
+    Row count alone is not enough. The weekly file has ONE row per campaign
+    week whether or not any weigh-ins landed, so an empty fetch produces the
+    same number of rows with every value blanked. Counting populated cells
+    catches "same shape, less data", which is the degradation that matters.
+    """
+    volatile = {"built_at"}   # changes every run; not evidence of data
+    cells = sum(1 for row in rows for k, v in row.items()
+                if k not in volatile and v not in ("", None))
+    return len(rows), cells
+
+
+def _existing_substance(path: Path) -> tuple:
+    if not path.exists():
+        return (0, 0)
+    try:
+        with path.open(newline="") as handle:
+            return _substance(list(csv.DictReader(handle)))
+    except OSError:
+        return (0, 0)
+
+
+def write_csv(path: Path, columns: List[str], rows: List[dict],
+              allow_shrink: bool = False) -> None:
+    """Write atomically, and refuse to silently replace a file with less data.
+
+    Two failure modes this closes:
+
+    1. A truncating rewrite meant an upstream degradation could DELETE good
+       derived state. An empty API response produced a CSV with no weight, no
+       lean mass, and lean_floor_breach reading False — exit code 0, nothing to
+       alert on. Output that is smaller but still well-formed is the most
+       dangerous shape of failure, because everything downstream still parses.
+    2. A non-atomic write leaves a truncated file if the process is killed
+       mid-write. os.replace() is atomic on POSIX: readers see either the old
+       file or the new one, never a half-written one.
+
+    Raises ShrinkGuard rather than writing when the new data has fewer rows.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="") as handle:
+    old_rows, old_cells = _existing_substance(path)
+    new_rows, new_cells = _substance(rows)
+    if not allow_shrink and (new_rows < old_rows or new_cells < old_cells):
+        raise ShrinkGuard(
+            "{}: refusing to overwrite — the new data has less in it.\n"
+            "  existing: {} rows, {} populated cells\n"
+            "  new:      {} rows, {} populated cells\n"
+            "A fetch probably failed partially and `build` ran against incomplete "
+            "raw data. The existing file is untouched.\n"
+            "Re-run `fetch`. If the loss is genuine, pass --allow-shrink."
+            .format(path.name, old_rows, old_cells, new_rows, new_cells)
+        )
+
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
+    os.replace(tmp, path)
