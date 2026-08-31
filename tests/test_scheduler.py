@@ -72,12 +72,12 @@ def _london(y, m, d, hh, mm=0):
 
 
 def test_next_run_is_later_today_when_the_slot_has_not_passed():
-    assert scheduler.next_run(_london(2026, 9, 1, 5, 0), 6, 30) == \
+    assert scheduler.next_run(_london(2026, 9, 1, 5, 0), [(6, 30)]) == \
         _london(2026, 9, 1, 6, 30)
 
 
 def test_next_run_rolls_to_tomorrow_once_the_slot_has_passed():
-    assert scheduler.next_run(_london(2026, 9, 1, 6, 30), 6, 30) == \
+    assert scheduler.next_run(_london(2026, 9, 1, 6, 30), [(6, 30)]) == \
         _london(2026, 9, 2, 6, 30)
 
 
@@ -89,12 +89,12 @@ def test_the_run_time_survives_the_october_clock_change():
     the entire point of running at 06:30.
     """
     before = _london(2026, 10, 23, 7, 0)        # Fri, still BST (+01:00)
-    first = scheduler.next_run(before, 6, 30)   # Sat 24 Oct, last BST morning
+    first = scheduler.next_run(before, [(6, 30)])   # Sat 24 Oct, last BST morning
     assert first.date().isoformat() == "2026-10-24"
     assert (first.hour, first.minute) == (6, 30)
     assert first.utcoffset() == timedelta(hours=1)
 
-    second = scheduler.next_run(first, 6, 30)   # Sun 25 Oct, now GMT
+    second = scheduler.next_run(first, [(6, 30)])   # Sun 25 Oct, now GMT
     assert second.date().isoformat() == "2026-10-25"
     assert (second.hour, second.minute) == (6, 30)
     assert second.utcoffset() == timedelta(0), "should be GMT after the change"
@@ -113,14 +113,14 @@ def test_the_sleep_length_is_real_elapsed_time_not_wall_clock():
     wrong one wakes the job an hour early on the one night of the campaign when
     date attribution is most fragile."""
     evening = _london(2026, 10, 24, 23, 0)          # BST, +01:00
-    target = scheduler.next_run(evening, 6, 30)     # 25 Oct 06:30 GMT
+    target = scheduler.next_run(evening, [(6, 30)])     # 25 Oct 06:30 GMT
     assert scheduler.seconds_until(target, evening) == 8.5 * 3600
 
 
 def test_previous_run_is_the_most_recent_past_slot():
-    assert scheduler.previous_run(_london(2026, 9, 1, 6, 29), 6, 30) == \
+    assert scheduler.previous_run(_london(2026, 9, 1, 6, 29), [(6, 30)]) == \
         _london(2026, 8, 31, 6, 30)
-    assert scheduler.previous_run(_london(2026, 9, 1, 6, 31), 6, 30) == \
+    assert scheduler.previous_run(_london(2026, 9, 1, 6, 31), [(6, 30)]) == \
         _london(2026, 9, 1, 6, 30)
 
 
@@ -219,12 +219,12 @@ def test_healthcheck_is_green_after_a_recent_success(heartbeat):
 
 def test_catch_up_fires_when_the_last_slot_produced_no_success(heartbeat):
     """Reboot safety: the box coming back at 07:10 must not skip today."""
-    slot = scheduler.previous_run(clock.now(), 6, 30)
+    slot = scheduler.previous_run(clock.now(), [(6, 30)])
     heartbeat(last_success=(slot - timedelta(minutes=5)).isoformat())
-    assert scheduler.missed_todays_run(6, 30) is True
+    assert scheduler.missed_todays_run([(6, 30)]) is True
 
     heartbeat(last_success=(slot + timedelta(minutes=5)).isoformat())
-    assert scheduler.missed_todays_run(6, 30) is False
+    assert scheduler.missed_todays_run([(6, 30)]) is False
 
 
 # ----------------------------------------------------- exit-code vocabulary
@@ -245,3 +245,55 @@ def test_every_documented_build_failure_has_an_explanation():
     assert codes, "expected cmd_build to return explicit exit codes"
     missing = codes - set(scheduler.EXIT_MEANING)
     assert not missing, "no alert text for build exit code(s) {}".format(missing)
+
+
+# --------------------------------------------------------- multiple slots
+
+def test_parse_schedule_accepts_one_or_many_and_sorts_them():
+    assert scheduler.parse_schedule("13:00") == [(13, 0)]
+    assert scheduler.parse_schedule("20:00,13:00") == [(13, 0), (20, 0)]
+    assert scheduler.parse_schedule(" 13:00 , 20:00 ") == [(13, 0), (20, 0)]
+
+
+def test_parse_schedule_deduplicates():
+    assert scheduler.parse_schedule("13:00,13:00") == [(13, 0)]
+
+
+def test_parse_schedule_rejects_empty_and_invalid():
+    with pytest.raises(SystemExit):
+        scheduler.parse_schedule("")
+    with pytest.raises(SystemExit):
+        scheduler.parse_schedule("25:00")
+
+
+def test_next_run_picks_the_soonest_upcoming_slot():
+    """The whole point of two slots: at 14:00 the next run is 20:00 today,
+    not 13:00 tomorrow."""
+    times = [(13, 0), (20, 0)]
+    assert scheduler.next_run(_london(2026, 9, 1, 14, 0), times) == \
+        _london(2026, 9, 1, 20, 0)
+    assert scheduler.next_run(_london(2026, 9, 1, 21, 0), times) == \
+        _london(2026, 9, 2, 13, 0)
+    assert scheduler.next_run(_london(2026, 9, 1, 9, 0), times) == \
+        _london(2026, 9, 1, 13, 0)
+
+
+def test_previous_run_picks_the_most_recent_past_slot():
+    times = [(13, 0), (20, 0)]
+    assert scheduler.previous_run(_london(2026, 9, 1, 14, 0), times) == \
+        _london(2026, 9, 1, 13, 0)
+    assert scheduler.previous_run(_london(2026, 9, 1, 21, 0), times) == \
+        _london(2026, 9, 1, 20, 0)
+    # Before the first slot of the day, the most recent is yesterday evening.
+    assert scheduler.previous_run(_london(2026, 9, 1, 9, 0), times) == \
+        _london(2026, 8, 31, 20, 0)
+
+
+def test_a_second_slot_does_not_break_the_october_clock_change():
+    """Both slots must stay on their wall-clock times across the DST boundary."""
+    times = [(13, 0), (20, 0)]
+    sat_evening = _london(2026, 10, 24, 21, 0)     # after Saturday's 20:00
+    nxt = scheduler.next_run(sat_evening, times)   # Sunday 25 Oct, now GMT
+    assert (nxt.hour, nxt.minute) == (13, 0)
+    assert nxt.tzinfo is not None
+    assert nxt.utcoffset().total_seconds() == 0    # GMT, not BST

@@ -44,8 +44,13 @@ services:
       # change a no-op instead of an edit.
       TZ: "Europe/London"
 
-      RUN_AT: "13:00"                # midday: the morning weigh-in has landed,
-                                     # and the Mac is likely awake for the rsync
+      # TWO slots. `physicalTime` on a reading is when he stood on the scale,
+      # NOT when VeSync propagated it to Google Health — observed 2026-08-31:
+      # weighed 10:27 BST, absent from the API at 13:00, present by 15:07.
+      # 13:00 catches a fast sync; 20:00 catches a slow one the same day.
+      # Re-running is free: each run refetches the whole campaign and the
+      # writes are idempotent, so a second slot can only ever add data.
+      RUN_AT: "13:00,20:00"
       # Real targets/thresholds are personal health data: never in the image,
       # never in git. Mounted read-only from the server (see volumes).
       COACH_SYNC_CAMPAIGN_CONFIG: "/app/config/campaign.toml"

@@ -363,7 +363,27 @@ def parse_hhmm(value: str) -> Tuple[int, int]:
     return int(hour), int(minute or 0)
 
 
-def next_run(after: datetime, hour: int, minute: int) -> datetime:
+def parse_schedule(value: str) -> List[Tuple[int, int]]:
+    """"13:00,20:00" -> [(13, 0), (20, 0)], sorted and de-duplicated.
+
+    Several run times per day, because a weigh-in reaches Google Health hours
+    after the scale records it — `physicalTime` is when he stood on the scale,
+    not when the reading became fetchable. A single slot either fires too early
+    to see the morning's reading or too late to be useful during the day.
+    Re-running is free: every run refetches the whole campaign and the writes
+    are idempotent, so a second slot can only add data, never disturb it.
+    """
+    times = sorted({parse_hhmm(part) for part in value.split(",") if part.strip()})
+    if not times:
+        raise SystemExit("RUN_AT is empty — expected e.g. '13:00' or '13:00,20:00'")
+    for hour, minute in times:
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise SystemExit("RUN_AT has an invalid time: {:02d}:{:02d}".format(
+                hour, minute))
+    return times
+
+
+def _next_single(after: datetime, hour: int, minute: int) -> datetime:
     """Next occurrence of hour:minute in Europe/London, strictly after `after`.
 
     Built from a London-aware `datetime` rather than by adding 86400 seconds:
@@ -376,6 +396,11 @@ def next_run(after: datetime, hour: int, minute: int) -> datetime:
         candidate = (candidate + timedelta(days=1)).replace(
             hour=hour, minute=minute, second=0, microsecond=0)
     return candidate
+
+
+def next_run(after: datetime, times: List[Tuple[int, int]]) -> datetime:
+    """The soonest of all configured slots, strictly after `after`."""
+    return min(_next_single(after, h, m) for h, m in times)
 
 
 def seconds_until(target: datetime, from_: Optional[datetime] = None) -> float:
@@ -394,7 +419,7 @@ def seconds_until(target: datetime, from_: Optional[datetime] = None) -> float:
             - start.astimezone(timezone.utc)).total_seconds()
 
 
-def previous_run(before: datetime, hour: int, minute: int) -> datetime:
+def _previous_single(before: datetime, hour: int, minute: int) -> datetime:
     candidate = before.astimezone(CAMPAIGN_TZ).replace(
         hour=hour, minute=minute, second=0, microsecond=0)
     if candidate > before:
@@ -403,16 +428,21 @@ def previous_run(before: datetime, hour: int, minute: int) -> datetime:
     return candidate
 
 
-def missed_todays_run(hour: int, minute: int) -> bool:
+def previous_run(before: datetime, times: List[Tuple[int, int]]) -> datetime:
+    """The most recent of all configured slots, at or before `before`."""
+    return max(_previous_single(before, h, m) for h, m in times)
+
+
+def missed_todays_run(times: List[Tuple[int, int]]) -> bool:
     """True if the most recent scheduled slot has no successful run.
 
     Makes the job reboot-safe: the box coming back up at 07:10 after a power cut
-    should not mean today's data is skipped until tomorrow. Also means the very
-    first `up -d` proves the deployment immediately instead of at 06:30.
+    should not mean that slot is skipped until tomorrow. Also means the very
+    first `up -d` proves the deployment immediately instead of at the next slot.
     """
     state = read_heartbeat()
     last_success = state.get("last_success")
-    slot = previous_run(now(), hour, minute)
+    slot = previous_run(now(), times)
     if not last_success:
         return True
     return datetime.fromisoformat(last_success) < slot
@@ -430,8 +460,8 @@ def _handle_signal(signum, _frame) -> None:
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="coach_sync.scheduler")
-    parser.add_argument("--at", default=os.environ.get("RUN_AT", "06:30"),
-                        help="daily run time, HH:MM Europe/London")
+    parser.add_argument("--at", default=os.environ.get("RUN_AT", "13:00,20:00"),
+                        help="run time(s), HH:MM Europe/London, comma-separated")
     parser.add_argument("--run-once", action="store_true",
                         help="run one cycle now and exit with its code")
     parser.add_argument("--healthcheck", action="store_true",
@@ -444,8 +474,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
-    hour, minute = parse_hhmm(args.at)
-    log("starting — daily at {:02d}:{:02d} Europe/London".format(hour, minute))
+    times = parse_schedule(args.at)
+    log("starting — daily at {} Europe/London".format(
+        ", ".join("{:02d}:{:02d}".format(h, m) for h, m in times)))
 
     problems = preflight()
     if problems:
@@ -464,13 +495,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.run_once:
         return run_cycle()
 
-    if _env_bool("CATCH_UP", True) and missed_todays_run(hour, minute):
-        log("no successful run since the last {:02d}:{:02d} slot — "
-            "running now (catch-up)".format(hour, minute))
+    if _env_bool("CATCH_UP", True) and missed_todays_run(times):
+        slot = previous_run(now(), times)
+        log("no successful run since the {} slot — running now (catch-up)".format(
+            slot.strftime("%H:%M")))
         run_cycle()
 
     while not _stop.is_set():
-        target = next_run(now(), hour, minute)
+        target = next_run(now(), times)
         write_heartbeat(next_run=target.isoformat())
         seconds = seconds_until(target)
         log("sleeping {:.1f}h until {}".format(
