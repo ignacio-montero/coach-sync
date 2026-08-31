@@ -117,17 +117,51 @@ EXCLUDED_EXERCISE_TYPES = {"WALKING"}
 # and each phantom inflates the adherence numerator.
 MIN_SESSION_MINUTES = 10.0
 
-# exerciseType -> the plan's slot vocabulary (full_plan.md section 6).
-SLOT_MAP = {
+# The C-slot ceiling, from technique.md: "145 is a ceiling, not a target.
+# Above it the easy run stops being a recovery session." A run over this did
+# the job of a B, whatever it was meant to be.
+C_SLOT_HR_CEILING = 145.0
+
+# Slots that are DEFINITIONAL — the plan assigns these by activity, not by
+# intensity (full_plan.md section 6 "Slots").
+#   A = resistance      B = high-intensity intermittent: tennis, football,
+#   C = aerobic base        intervals
+SLOT_BY_TYPE = {
     "STRENGTH_TRAINING": "A",
-    "TENNIS": "C",
-    "SPORT": "C",
-    "RUNNING": "B",
-    "BIKING": "B",
-    "CARDIO_WORKOUT": "B",
-    "WORKOUT": "B",
-    "SWIMMING": "B",
+    "WEIGHTLIFTING": "A",
+    "TENNIS": "B",       # "tennis runs 141-163 — it IS a hard session"
+    "FOOTBALL": "B",
+    "SOCCER": "B",
+    "SPORT": "B",
 }
+
+# Slots decided by INTENSITY, because the plan itself splits them that way:
+# an easy run is C, the same distance run hard is the interval session, a B.
+SLOT_BY_INTENSITY = {"RUNNING", "BIKING", "SWIMMING", "WORKOUT",
+                     "CARDIO_WORKOUT", "HIIT", "ELLIPTICAL", "ROWING"}
+
+# The ceiling flag applies to RUNNING only. technique.md names running above
+# 145 as "the single most expensive habit available to him" because it converts
+# a recovery session into a third hard one. Football and a generic hard workout
+# are B sessions by design — flagging those would be noise, and a flag that
+# fires on things that are working teaches you to ignore it.
+C_CEILING_APPLIES = {"RUNNING"}
+
+
+def slot_for(kind: str, avg_hr: Optional[float]) -> str:
+    """The plan's slot for a session. "" when it genuinely cannot be inferred.
+
+    A wrong slot label is worse than a missing one: it silently corrupts the
+    weekly slot counts that adherence is judged on, and nothing downstream can
+    tell a guess from a fact.
+    """
+    if kind in SLOT_BY_TYPE:
+        return SLOT_BY_TYPE[kind]
+    if kind in SLOT_BY_INTENSITY:
+        if avg_hr is None:
+            return ""          # unknown intensity -> unknown slot, not a guess
+        return "C" if avg_hr <= C_SLOT_HR_CEILING else "B"
+    return ""
 
 
 def parse_duration_seconds(raw: Any) -> Optional[float]:
@@ -340,6 +374,7 @@ def parse_exercise(points: List[dict]) -> List[dict]:
         metrics = payload.get("metricsSummary", {}) or {}
         seconds = parse_duration_seconds(payload.get("activeDuration"))
         method = point.get("dataSource", {}).get("recordingMethod", "")
+        avg_hr = to_float(metrics.get("averageHeartRateBeatsPerMinute"))
 
         if seconds is not None and seconds < MIN_SESSION_MINUTES * 60:
             continue
@@ -350,10 +385,17 @@ def parse_exercise(points: List[dict]) -> List[dict]:
             "_start": start,
             "activity": payload.get("displayName") or kind.title().replace("_", " "),
             "exercise_type": kind,
-            "slot": SLOT_MAP.get(kind, ""),
+            "slot": slot_for(kind, avg_hr),
             "duration_min": round(seconds / 60.0, 1) if seconds else "",
             "active_zone_minutes": to_float(metrics.get("activeZoneMinutes")) or "",
-            "avg_hr": to_float(metrics.get("averageHeartRateBeatsPerMinute")) or "",
+            "avg_hr": avg_hr if avg_hr is not None else "",
+            # technique.md calls running above 145 "the single most expensive
+            # habit available to him" — it turns a recovery session into a third
+            # hard one. Flag it rather than making the coach spot it.
+            "above_c_ceiling": (
+                avg_hr > C_SLOT_HR_CEILING
+                if (avg_hr is not None and kind in C_CEILING_APPLIES) else ""
+            ),
             "recording_method": method,
             # Captured for completeness, NEVER used to set intake — the coach
             # explicitly distrusts wearable calorie figures.

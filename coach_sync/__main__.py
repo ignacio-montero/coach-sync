@@ -180,7 +180,7 @@ def cmd_build(args):
             OUT_DIR / "sessions.csv",
             ["date", "start_time", "activity", "exercise_type", "slot",
              "duration_min", "active_zone_minutes", "avg_hr",
-             "recording_method", "calories"],
+             "above_c_ceiling", "recording_method", "calories"],
             sessions, allow_shrink,
         )
     except transform.ShrinkGuard as exc:

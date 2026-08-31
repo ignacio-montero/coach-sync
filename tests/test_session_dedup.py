@@ -168,9 +168,77 @@ def test_slot_mapping_covers_every_type_the_watch_actually_emits():
     silently stops counting towards a named slot in the plan."""
     observed = {"STRENGTH_TRAINING", "TENNIS", "RUNNING", "WORKOUT",
                 "CARDIO_WORKOUT", "SPORT", "BIKING"}
-    unmapped = observed - set(transform.SLOT_MAP)
+    known = set(transform.SLOT_BY_TYPE) | transform.SLOT_BY_INTENSITY
+    unmapped = observed - known
     assert unmapped == set(), unmapped
 
 
 def test_empty_input_is_an_empty_list():
     assert transform.parse_exercise([]) == []
+
+
+# ------------------------------------------------- slots match the plan
+
+def test_tennis_is_B_not_C():
+    """full_plan.md: B is "high-intensity intermittent — tennis, football,
+    intervals". These were inverted, which would have corrupted every weekly
+    slot count. Caught by the coach reading its own data, 2026-08-31."""
+    assert transform.slot_for("TENNIS", 138.0) == "B"
+    assert transform.slot_for("TENNIS", None) == "B"      # definitional
+
+
+def test_an_easy_run_is_C_and_a_hard_run_is_B():
+    """technique.md: "145 is a ceiling, not a target. Above it the easy run
+    stops being a recovery session." So the slot follows the intensity."""
+    assert transform.slot_for("RUNNING", 129.0) == "C"
+    assert transform.slot_for("RUNNING", 145.0) == "C"    # at the ceiling
+    assert transform.slot_for("RUNNING", 155.0) == "B"    # over it
+
+
+def test_an_intensity_slot_is_blank_without_heart_rate():
+    """A wrong slot silently corrupts adherence counts; a blank one does not.
+    Never guess."""
+    assert transform.slot_for("RUNNING", None) == ""
+
+
+def test_an_unknown_activity_gets_no_slot():
+    assert transform.slot_for("SNORKELLING", 130.0) == ""
+
+
+def test_running_over_the_ceiling_is_flagged():
+    """"The single most expensive habit available to him" — technique.md."""
+    def run(hr):
+        return {"exercise": {"interval": {"startTime": "2026-08-26T17:24:00Z",
+                                          "startUtcOffset": "3600s"},
+                             "exerciseType": "RUNNING",
+                             "activeDuration": "1638s",
+                             "metricsSummary": {
+                                 "averageHeartRateBeatsPerMinute": str(hr)}},
+                "dataSource": {"recordingMethod": "ACTIVELY_MEASURED"}}
+    assert transform.parse_exercise([run(138)])[0]["above_c_ceiling"] is False
+    assert transform.parse_exercise([run(158)])[0]["above_c_ceiling"] is True
+
+
+def test_a_hard_generic_workout_is_not_flagged_against_the_C_ceiling():
+    """Football logs as WORKOUT and is a B session by design. A flag that fires
+    on things that are working teaches you to ignore it."""
+    point = {"exercise": {"interval": {"startTime": "2026-08-25T18:11:00Z",
+                                       "startUtcOffset": "3600s"},
+                          "exerciseType": "WORKOUT", "activeDuration": "3948s",
+                          "metricsSummary": {
+                              "averageHeartRateBeatsPerMinute": "155"}},
+             "dataSource": {"recordingMethod": "ACTIVELY_MEASURED"}}
+    row = transform.parse_exercise([point])[0]
+    assert row["slot"] == "B"
+    assert row["above_c_ceiling"] == ""
+
+
+def test_tennis_is_never_flagged_against_the_C_ceiling():
+    """Tennis is meant to be hard. Flagging it would be noise."""
+    point = {"exercise": {"interval": {"startTime": "2026-08-28T15:03:00Z",
+                                       "startUtcOffset": "3600s"},
+                          "exerciseType": "TENNIS", "activeDuration": "3763s",
+                          "metricsSummary": {
+                              "averageHeartRateBeatsPerMinute": "158"}},
+             "dataSource": {"recordingMethod": "ACTIVELY_MEASURED"}}
+    assert transform.parse_exercise([point])[0]["above_c_ceiling"] == ""
