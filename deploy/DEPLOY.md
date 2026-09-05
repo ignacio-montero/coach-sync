@@ -129,6 +129,21 @@ ssh homelab 'sudo rsync -a /tmp/coach-data/ /home/nacho/coach-sync/data/ \
 This also arms the **shrink guard**: `build` refuses to replace a CSV with one
 containing less data, so a partial fetch cannot quietly delete history.
 
+One shrink is legitimate and is budgeted for rather than alerted on:
+`sessions.csv` drops a watch-detected `STRENGTH_TRAINING` row whenever the same
+workout arrives from Hevy, which is authoritative for the anchor sessions. A
+gym session that syncs to Hevy a day after the watch logged it therefore removes
+a row an earlier run already wrote. `build` passes those rows to the guard as an
+exact allowance — a shrink of even one cell beyond them still refuses — so a
+partial fetch hiding behind a dedup is still caught. When the allowance is
+used the build says so:
+
+```
+  sessions.csv: 1 row(s) shrank for a known reason (superseded), allowed
+```
+
+That line naming a NON-gym row would mean the predicate is wrong; investigate.
+
 ### 2.4 The service definition and its secrets
 
 ```bash
@@ -330,9 +345,10 @@ table for when you are reading logs directly.
 | Exit | Meaning | What to do |
 |---|---|---|
 | `1` (fetch) | Credentials or network | Almost always `invalid_grant` — the Google refresh token died. Re-consent, update `.env`, `docker compose up -d coach-sync`. Check the consent screen is still "In production" (see OQ-5). |
-| `2` (build) | **Refused to write** — new data had less in it than the file on disk | A partial fetch. The existing CSVs are untouched and still good. Re-run fetch. Only if the loss is genuine: `docker compose run --rm --entrypoint python coach-sync -m coach_sync build --allow-shrink` |
+| `2` (build) | **Refused to write** — new data had less in it than the file on disk | The existing CSVs are untouched and still good. **The alert names the file** — that is what tells you which cause it is. `lifts.csv` or a `metrics_*` file: a partial fetch, re-run fetch. `sessions.csv` alone: see below. Only if the loss is genuine: `docker compose run --rm --entrypoint python coach-sync -m coach_sync build --allow-shrink` |
 | `3` (build) | Nothing dated parsed at all | The API response shape changed. `--entrypoint python … -m coach_sync inspect` against the raw JSON and pin the parser. |
 | `4` (build) | **Stale** — newest record older than 2 days | The CSVs are written but describe the past. Usually a failed fetch earlier in the chain. |
+| `5` (fetch) | **Partial fetch** — Google Health succeeded, Hevy did not | Deliberately NOT fatal: `build` still runs, so weight/sleep/HR stay current while lifting data lags. Usually transient (Hevy rate-limits bursts and is retried with backoff). If it repeats across several cycles, check `HEVY_API_KEY` and that the Hevy Pro subscription is live. Expect `sessions.csv` to shrink by a row on the run that catches up — that is the allowance below, not a fault. |
 | `78` | Refused to start — misconfigured | The log names the problem: missing `campaign.toml`, missing credentials, wrong TZ, unwritable volume. The container backs off 5 min before exiting so it cannot hot-loop. |
 | `124` | A step hit its wall-clock timeout and was killed | A hung HTTP call. Look for a Google/Hevy outage; the next cycle retries. |
 
