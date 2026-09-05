@@ -52,7 +52,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from . import notify
+from . import PARTIAL_FETCH, notify
 from .clock import CAMPAIGN_TZ, assert_local_timezone, now
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -68,9 +68,15 @@ HEARTBEAT = STATE_DIR / "heartbeat.json"
 CAMPAIGN_CONFIG = Path(os.environ.get("COACH_SYNC_CAMPAIGN_CONFIG")
                        or ROOT / "campaign.toml")
 
-# What each `build` exit code means, in words a phone notification can carry.
+# What each exit code means, in words a phone notification can carry.
 EXIT_MEANING = {
     0: "ok",
+    PARTIAL_FETCH: (
+        "PARTIAL FETCH — Google Health is fine, but the Hevy fetch failed. "
+        "Weight, sleep and heart data are up to date; lifting data is not, and "
+        "until it catches up the gym sessions cannot be de-duplicated against "
+        "the watch. Usually transient (Hevy rate-limits bursts and is retried "
+        "with backoff); if it persists, check HEVY_API_KEY and the Pro sub."),
     2: ("REFUSED TO WRITE — the new data had LESS in it than the file on disk. "
         "A fetch probably succeeded partially. The existing CSVs are untouched "
         "and still good; re-run fetch. If the loss is real, run build with "
@@ -302,7 +308,7 @@ def run_cycle() -> int:
     delay_min = _env_int("RETRY_DELAY_MINUTES", 10)
     code, tail = run_step(["fetch"], timeout_s=_env_int("FETCH_TIMEOUT_S", 900))
     attempt = 0
-    while code != 0 and attempt < retries and not _stop.is_set():
+    while code not in (0, PARTIAL_FETCH) and attempt < retries and not _stop.is_set():
         attempt += 1
         log("fetch failed (exit {}); retry {}/{} in {} min"
             .format(code, attempt, retries, delay_min))
@@ -311,6 +317,14 @@ def run_cycle() -> int:
         if _stop.wait(delay_min * 60):
             return 0
         code, tail = run_step(["fetch"], timeout_s=_env_int("FETCH_TIMEOUT_S", 900))
+
+    if code == PARTIAL_FETCH:
+        # Deliberately NOT retried here: the failing source already retried
+        # itself with backoff, and re-running `fetch` would re-hit Google for
+        # data it just fetched successfully. Alert, then carry on to build.
+        alert("FETCH PARTIAL (exit {}).\n\n{}".format(
+            code, EXIT_MEANING[PARTIAL_FETCH]), tail, key="fetch-partial")
+        code = 0
 
     if code != 0:
         alert("FETCH FAILED (exit {}).\n\n"

@@ -297,3 +297,87 @@ def test_a_second_slot_does_not_break_the_october_clock_change():
     assert (nxt.hour, nxt.minute) == (13, 0)
     assert nxt.tzinfo is not None
     assert nxt.utcoffset().total_seconds() == 0    # GMT, not BST
+
+
+# ------------------------------------------------ partial fetch (exit 5)
+#
+# WHY THIS CODE EXISTS
+# --------------------
+# `fetch` used to catch a Hevy failure, print FAILED, and return 0. Seven
+# consecutive production fetches failed that way without a single Telegram
+# message, and `build` kept running against a stale Hevy capture — which then
+# mis-deduplicated the gym sessions and tripped the shrink guard instead. The
+# alert fired for the symptom, two days after the cause.
+#
+# The fix has two halves and both need holding in place: the failure must be
+# VISIBLE (a distinct exit code with alert text), and it must NOT be fatal
+# (weight is what the campaign is scored on; a missing lift log must never cost
+# a missing weight trend).
+
+def test_a_partial_fetch_has_its_own_exit_code_and_alert_text():
+    from coach_sync import PARTIAL_FETCH
+    assert PARTIAL_FETCH in scheduler.EXIT_MEANING
+    assert scheduler.EXIT_MEANING[PARTIAL_FETCH] != "ok"
+
+
+def test_every_fetch_code_routed_through_EXIT_MEANING_has_text():
+    """The sibling of the cmd_build drift guard.
+
+    Narrower than the build one on purpose: a hard fetch failure (return 1) is
+    reported by the scheduler's bespoke FETCH FAILED branch, which carries its
+    own credentials-oriented text and never consults EXIT_MEANING. The codes
+    that DO get looked up are the named ones, so those are what can silently
+    degrade to a bare number on the phone.
+    """
+    from coach_sync import __main__ as cli
+    import inspect
+
+    source = inspect.getsource(cli.cmd_fetch)
+    named = {cli.PARTIAL_FETCH} if "PARTIAL_FETCH" in source else set()
+    assert named, "expected cmd_fetch to signal a partial fetch by name"
+    missing = named - set(scheduler.EXIT_MEANING)
+    assert not missing, "no alert text for fetch exit code(s) {}".format(missing)
+
+
+def _run_cycle_with(monkeypatch, fetch_code, tmp_path):
+    """Drive run_cycle with a scripted `fetch` result, recording what it did."""
+    steps, alerts = [], []
+
+    def fake_run_step(args, timeout_s):
+        steps.append(args[0])
+        return (fetch_code if args[0] == "fetch" else 0), ""
+
+    monkeypatch.setattr(scheduler, "run_step", fake_run_step)
+    monkeypatch.setattr(scheduler, "alert",
+                        lambda message, tail, key: alerts.append(key))
+    monkeypatch.setattr(scheduler, "write_heartbeat", lambda **kw: None)
+    monkeypatch.setattr(scheduler, "prune_raw", lambda keep: None)
+    code = scheduler.run_cycle()
+    return code, steps, alerts
+
+
+def test_a_partial_fetch_alerts_but_still_builds(monkeypatch, tmp_path):
+    """The whole point. Hevy being down must not stop the weight trend."""
+    from coach_sync import PARTIAL_FETCH
+    code, steps, alerts = _run_cycle_with(monkeypatch, PARTIAL_FETCH, tmp_path)
+    assert "build" in steps          # it carried on
+    assert alerts == ["fetch-partial"]
+    assert code == 0                 # the cycle as a whole succeeded
+
+
+def test_a_partial_fetch_is_not_retried(monkeypatch, tmp_path):
+    """The failing source already retried itself with backoff; re-running
+    `fetch` would only re-hit Google for data it just fetched successfully."""
+    from coach_sync import PARTIAL_FETCH
+    monkeypatch.setenv("FETCH_RETRIES", "3")
+    _, steps, _ = _run_cycle_with(monkeypatch, PARTIAL_FETCH, tmp_path)
+    assert steps.count("fetch") == 1
+
+
+def test_a_total_fetch_failure_still_aborts_before_build(monkeypatch, tmp_path):
+    """The pre-existing contract, unchanged: no Google data, nothing to build."""
+    monkeypatch.setenv("FETCH_RETRIES", "0")
+    code, steps, alerts = _run_cycle_with(monkeypatch, 1, tmp_path)
+    assert "build" not in steps
+    assert alerts == ["fetch-failed"]
+    assert code == 1

@@ -673,14 +673,30 @@ def _substance(rows: List[dict]) -> tuple:
     return len(rows), cells
 
 
-def _existing_substance(path: Path) -> tuple:
+def _read_existing(path: Path) -> List[dict]:
     if not path.exists():
-        return (0, 0)
+        return []
     try:
         with path.open(newline="") as handle:
-            return _substance(list(csv.DictReader(handle)))
+            return list(csv.DictReader(handle))
     except OSError:
-        return (0, 0)
+        return []
+
+
+def _existing_substance(path: Path) -> tuple:
+    return _substance(_read_existing(path))
+
+
+def _row_key(row: dict, fields) -> tuple:
+    """Identity of a row, as strings — the old side is always read back from
+    CSV, where every value is a string, so the new side must be stringified too
+    or nothing would ever match."""
+    return tuple(str(row.get(f, "")) for f in fields)
+
+
+def _dropped_rows(old: List[dict], new: List[dict], fields) -> List[dict]:
+    new_keys = {_row_key(r, fields) for r in new}
+    return [r for r in old if _row_key(r, fields) not in new_keys]
 
 
 def staleness_days(weekly: List[dict], today: Optional[date] = None) -> Optional[int]:
@@ -701,7 +717,8 @@ def staleness_days(weekly: List[dict], today: Optional[date] = None) -> Optional
 
 
 def write_csv(path: Path, columns: List[str], rows: List[dict],
-              allow_shrink: bool = False) -> None:
+              allow_shrink: bool = False, key_fields=None,
+              loss_is_expected=None) -> Optional[str]:
     """Write atomically, and refuse to silently replace a file with less data.
 
     Two failure modes this closes:
@@ -716,20 +733,48 @@ def write_csv(path: Path, columns: List[str], rows: List[dict],
        file or the new one, never a half-written one.
 
     Raises ShrinkGuard rather than writing when the new data has fewer rows.
+
+    NOT every shrink is a degradation, though — and a guard that cries wolf gets
+    switched off, which costs more than it saves. `key_fields` + `loss_is_expected`
+    let a caller describe the shrinks that are CORRECT. sessions.csv forced this:
+    a watch-detected STRENGTH_TRAINING row is not lost when it disappears, it is
+    SUPERSEDED — Hevy is authoritative for gym work, so once the Hevy workout for
+    that date lands, the watch's duplicate is removed here and the real sets live
+    in lifts.csv. Hevy data routinely arrives after the build that first saw the
+    watch record, so this shrink is a normal daily event.
+
+    Crucially the forgiveness is NARROW: the guard re-runs against the old file
+    minus only the rows it could account for. A run that both supersedes a watch
+    record AND loses something real still refuses.
+
+    Returns a note when a shrink was forgiven, so the caller can say so out loud;
+    a silent exception to a safety check is how the check stops being one.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    old_rows, old_cells = _existing_substance(path)
+    old = _read_existing(path)
+    old_rows, old_cells = _substance(old)
     new_rows, new_cells = _substance(rows)
+    note = None
     if not allow_shrink and (new_rows < old_rows or new_cells < old_cells):
-        raise ShrinkGuard(
-            "{}: refusing to overwrite — the new data has less in it.\n"
-            "  existing: {} rows, {} populated cells\n"
-            "  new:      {} rows, {} populated cells\n"
-            "A fetch probably failed partially and `build` ran against incomplete "
-            "raw data. The existing file is untouched.\n"
-            "Re-run `fetch`. If the loss is genuine, pass --allow-shrink."
-            .format(path.name, old_rows, old_cells, new_rows, new_cells)
-        )
+        forgiven = []
+        if key_fields and loss_is_expected:
+            forgiven = [r for r in _dropped_rows(old, rows, key_fields)
+                        if loss_is_expected(r)]
+        forgiven_ids = {id(r) for r in forgiven}
+        kept = [r for r in old if id(r) not in forgiven_ids]
+        base_rows, base_cells = _substance(kept)
+        if not forgiven or new_rows < base_rows or new_cells < base_cells:
+            raise ShrinkGuard(
+                "{}: refusing to overwrite — the new data has less in it.\n"
+                "  existing: {} rows, {} populated cells\n"
+                "  new:      {} rows, {} populated cells\n"
+                "A fetch probably failed partially and `build` ran against incomplete "
+                "raw data. The existing file is untouched.\n"
+                "Re-run `fetch`. If the loss is genuine, pass --allow-shrink."
+                .format(path.name, old_rows, old_cells, new_rows, new_cells)
+            )
+        note = "{}: {} row(s) shrank for a known reason (superseded), allowed".format(
+            path.name, len(forgiven))
 
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w", newline="") as handle:
@@ -737,3 +782,4 @@ def write_csv(path: Path, columns: List[str], rows: List[dict],
         writer.writeheader()
         writer.writerows(rows)
     os.replace(tmp, path)
+    return note

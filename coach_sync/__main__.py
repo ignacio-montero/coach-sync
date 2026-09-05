@@ -16,7 +16,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from . import campaign, hevy, sheets, transform
+from . import PARTIAL_FETCH, campaign, hevy, sheets, transform
 from .auth import get_access_token, load_env
 from .clock import today as london_today
 from .datatypes import REGISTRY
@@ -45,6 +45,7 @@ def cmd_fetch(args):
         return 1
     print("\n{} data types written to {}".format(len(written), RAW_DIR))
 
+    hevy_failed = False
     if os.environ.get("HEVY_API_KEY"):
         print("\n  fetching hevy workouts", end="", flush=True)
         try:
@@ -53,11 +54,16 @@ def cmd_fetch(args):
             print("           {:4d} workouts -> {}".format(count, path.name))
         except (RuntimeError, SystemExit) as exc:
             print("  FAILED\n    {}".format(exc))
+            hevy_failed = True
     else:
         print("\n  (HEVY_API_KEY not set - skipping lifting data)")
 
     print("\nNext: python -m coach_sync build")
-    return 0
+    # Exit 5, not 1: Google succeeded and its data is worth building from, so
+    # the scheduler must ALERT without aborting the cycle. Returning 0 here is
+    # what let seven consecutive Hevy failures pass unreported — `build` then
+    # runs against a stale Hevy file and silently mis-deduplicates the gym.
+    return PARTIAL_FETCH if hevy_failed else 0
 
 
 def cmd_inspect(args):
@@ -123,6 +129,7 @@ def cmd_build(args):
         print("   Run `python -m coach_sync inspect` and pin the parser.")
 
     lifts, gym = [], []
+    gym_days: set = set()
     hevy_path = latest_raw(RAW_DIR, "hevy_workouts")
     if hevy_path:
         workouts = json.loads(hevy_path.read_text())
@@ -176,13 +183,23 @@ def cmd_build(args):
              "is_top_set", "est_1rm_epley"],
             lifts, allow_shrink,
         )
-        transform.write_csv(
+        note = transform.write_csv(
             OUT_DIR / "sessions.csv",
             ["date", "start_time", "activity", "exercise_type", "slot",
              "duration_min", "active_zone_minutes", "avg_hr",
              "above_c_ceiling", "recording_method", "calories"],
             sessions, allow_shrink,
+            key_fields=("date", "start_time", "exercise_type"),
+            # The one shrink that is correct rather than a degradation: the
+            # watch's auto-detected copy of a gym session, removed once Hevy
+            # covers that date. Nothing is lost — the sets are in lifts.csv.
+            loss_is_expected=lambda row: (
+                row.get("exercise_type") == "STRENGTH_TRAINING"
+                and row.get("date") in gym_days
+            ),
         )
+        if note:
+            print("  {}".format(note))
     except transform.ShrinkGuard as exc:
         print("\n!! REFUSED TO WRITE\n{}".format(exc))
         return 2

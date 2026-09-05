@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -25,10 +26,24 @@ import httpx
 BASE_URL = "https://api.hevyapp.com/v1"
 PAGE_SIZE = 10  # API maximum
 
+# Hevy rate-limits a BURST, not a sustained rate: the whole page run fired
+# back-to-back returns 429, while the identical requests spaced a fraction of a
+# second apart all return 200. Because PAGE_SIZE is capped at 10 by the API,
+# the burst grows by one request per ~10 workouts logged — so this failure gets
+# MORE likely over a campaign, not less. Pace the pages, and treat a 429 as
+# transient rather than fatal.
+PAGE_PAUSE_S = 0.35
+RETRY_STATUSES = {429, 500, 502, 503, 504}
+MAX_ATTEMPTS = 5
+BACKOFF_BASE_S = 2.0
+
 # Warm-ups are not working sets. Including them would drag the top-set number
 # down and corrupt the autoregulation loop, which sets next week's load from the
 # heaviest set that actually counted.
 WORKING_SET_TYPES = {"normal", "failure", "dropset"}
+
+# Module-level so a test can swap it; see _get_page.
+_sleep = time.sleep
 
 
 def get_api_key() -> str:
@@ -41,8 +56,62 @@ def get_api_key() -> str:
     return key
 
 
-def fetch_workouts(api_key: str, raw_dir: Path) -> Path:
+def _retry_after_seconds(resp) -> Optional[float]:
+    """The server's own advice, when it gives any.
+
+    Retry-After is the polite contract for a 429: obeying it beats guessing,
+    because a backoff shorter than the server's window just re-trips the limit.
+    """
+    raw = resp.headers.get("Retry-After", "").strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return None
+
+
+def _get_page(client, page: int, sleep=None) -> Dict[str, Any]:
+    """One /workouts page, retrying the statuses that are transient.
+
+    `sleep` is injected so the backoff is exercisable in a test without the
+    test actually waiting — a retry loop that cannot be run fast tends to be an
+    untested one, and this one only ever runs on the bad day.
+
+    401 is deliberately NOT retried: a dead key is not transient, and hammering
+    it would bury a clear "re-consent" message under a rate-limit one.
+    """
+    sleep = sleep or _sleep
+    last = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        resp = client.get(
+            "{}/workouts".format(BASE_URL),
+            params={"page": page, "pageSize": PAGE_SIZE},
+        )
+        if resp.status_code == 401:
+            raise SystemExit(
+                "Hevy returned 401 Unauthorized — check HEVY_API_KEY, and that\n"
+                "the Hevy Pro subscription is active."
+            )
+        if resp.status_code == 200:
+            return resp.json()
+        last = resp
+        if resp.status_code not in RETRY_STATUSES:
+            break
+        if attempt < MAX_ATTEMPTS:
+            sleep(_retry_after_seconds(resp)
+                  or BACKOFF_BASE_S * (2 ** (attempt - 1)))
+
+    raise RuntimeError(
+        "Hevy /workouts page {} -> {} {} (gave up after {} attempt(s))\n{}".format(
+            page, last.status_code, last.reason_phrase,
+            MAX_ATTEMPTS if last.status_code in RETRY_STATUSES else 1,
+            last.text[:400],
+        )
+    )
+
+
+def fetch_workouts(api_key: str, raw_dir: Path, sleep=None) -> Path:
     """Fetch every workout, following pagination, and persist the raw JSON."""
+    sleep = sleep or _sleep
     raw_dir.mkdir(parents=True, exist_ok=True)
     headers = {"api-key": api_key}
     workouts: List[Dict[str, Any]] = []
@@ -50,27 +119,15 @@ def fetch_workouts(api_key: str, raw_dir: Path) -> Path:
     with httpx.Client(headers=headers, timeout=60) as client:
         page = 1
         while True:
-            resp = client.get(
-                "{}/workouts".format(BASE_URL),
-                params={"page": page, "pageSize": PAGE_SIZE},
-            )
-            if resp.status_code == 401:
-                raise SystemExit(
-                    "Hevy returned 401 Unauthorized — check HEVY_API_KEY, and that\n"
-                    "the Hevy Pro subscription is active."
-                )
-            if resp.status_code != 200:
-                raise RuntimeError(
-                    "Hevy /workouts -> {} {}\n{}".format(
-                        resp.status_code, resp.reason_phrase, resp.text[:400]
-                    )
-                )
-            body = resp.json()
+            body = _get_page(client, page, sleep=sleep)
             workouts.extend(body.get("workouts", []) or [])
             page_count = body.get("page_count", 1)
             if page >= page_count or page > 200:
                 break
             page += 1
+            # Pause BEFORE the next request rather than after the last one, so
+            # a single-page fetch pays no pause at all.
+            sleep(PAGE_PAUSE_S)
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     path = raw_dir / "hevy_workouts_{}.json".format(stamp)

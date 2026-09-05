@@ -194,7 +194,7 @@ def _page(request, page_count, per_page=2):
 
 def test_hevy_follows_every_page_up_to_page_count(hevy_server):
     log, tmp = hevy_server(lambda r: _page(r, 3))
-    path = hevy.fetch_workouts("key", tmp)
+    path = hevy.fetch_workouts("key", tmp, sleep=lambda _s: None)
     assert [int(r["page"]) for r in log] == [1, 2, 3]
     assert len(json.loads(path.read_text())) == 6
 
@@ -261,8 +261,10 @@ def test_hevy_other_failures_raise_rather_than_writing_an_empty_file(hevy_server
     """Writing an empty hevy_workouts_*.json would become the 'latest' capture
     and erase the lift history on the next build."""
     log, tmp = hevy_server(lambda r: httpx.Response(status, text="nope"))
+    # sleep is injected, not endured: 429/500/503 are now retried with backoff,
+    # so a real clock here would add 30s per parametrisation to the suite.
     with pytest.raises(RuntimeError):
-        hevy.fetch_workouts("key", tmp)
+        hevy.fetch_workouts("key", tmp, sleep=lambda _s: None)
     assert list(tmp.glob("hevy_workouts_*.json")) == []
 
 
@@ -293,3 +295,93 @@ def test_latest_raw_does_not_confuse_prefixed_type_names(tmp_path):
     and vice versa — the glob is `name_*`, so a shared prefix is a real risk."""
     (tmp_path / "daily_resting_heart_rate_20260830T120000Z.json").write_text("[]")
     assert extract.latest_raw(tmp_path, "daily_heart_rate_variability") is None
+
+
+# ------------------------------------------------- Hevy rate limiting (429)
+#
+# WHY THESE EXIST
+# ---------------
+# Hevy rate-limits a BURST. The fetch fired every page back-to-back, so once the
+# history passed ~70 workouts (8 pages) it started 429ing on most runs — 7 of 8
+# consecutive production fetches failed before this was found. The failure was
+# invisible: `fetch` printed FAILED and still returned 0, so `build` quietly ran
+# against a stale Hevy file and mis-deduplicated the gym sessions.
+#
+# The retry only ever runs on the bad day, which is exactly why it needs tests.
+# `sleep` is injected so they record the backoff instead of serving it.
+
+class Flaky:
+    """A fake Hevy that 429s the first `fails` requests, then serves normally."""
+
+    def __init__(self, fails, page_count=1, retry_after=None):
+        self.fails, self.page_count, self.retry_after = fails, page_count, retry_after
+        self.seen = 0
+
+    def __call__(self, request):
+        self.seen += 1
+        if self.seen <= self.fails:
+            headers = {"Retry-After": self.retry_after} if self.retry_after else {}
+            return httpx.Response(429, text="Too Many Requests", headers=headers)
+        return _page(request, self.page_count)
+
+
+def test_a_429_is_retried_rather_than_failing_the_whole_fetch(hevy_server):
+    """The bug that took out a week of lifting data: one 429 killed the fetch."""
+    naps = []
+    log, tmp = hevy_server(Flaky(fails=2))
+    path = hevy.fetch_workouts("key", tmp, sleep=naps.append)
+    assert len(json.loads(path.read_text())) == 2      # it recovered
+    assert len(log) == 3                               # two refusals, then 200
+
+
+def test_the_backoff_between_retries_grows(hevy_server):
+    """A fixed short retry just re-trips the same burst limit."""
+    naps = []
+    log, tmp = hevy_server(Flaky(fails=3))
+    hevy.fetch_workouts("key", tmp, sleep=naps.append)
+    assert naps == sorted(naps) and naps[0] < naps[-1]
+
+
+def test_a_retry_after_header_overrides_our_guess(hevy_server):
+    """Obeying the server beats guessing: a backoff shorter than its window
+    just gets refused again."""
+    naps = []
+    log, tmp = hevy_server(Flaky(fails=1, retry_after="7"))
+    hevy.fetch_workouts("key", tmp, sleep=naps.append)
+    assert naps[0] == 7.0
+
+
+def test_pages_are_spaced_so_the_burst_never_trips_the_limit(hevy_server):
+    """The actual fix. Retrying is the safety net; pacing is the cure."""
+    naps = []
+    log, tmp = hevy_server(lambda r: _page(r, 4))
+    hevy.fetch_workouts("key", tmp, sleep=naps.append)
+    assert len(log) == 4
+    # Three gaps for four pages — paced before each request, not after the last.
+    assert naps == [hevy.PAGE_PAUSE_S] * 3
+
+
+def test_a_single_page_fetch_pays_no_pause(hevy_server):
+    naps = []
+    log, tmp = hevy_server(lambda r: _page(r, 1))
+    hevy.fetch_workouts("key", tmp, sleep=naps.append)
+    assert naps == []
+
+
+def test_a_persistent_429_eventually_gives_up_loudly(hevy_server):
+    """Retrying forever would hang the cron. It must fail, and say why."""
+    naps = []
+    log, tmp = hevy_server(Flaky(fails=99))
+    with pytest.raises(RuntimeError, match="429"):
+        hevy.fetch_workouts("key", tmp, sleep=naps.append)
+    assert len(log) == hevy.MAX_ATTEMPTS
+
+
+def test_a_401_is_not_retried(hevy_server):
+    """A dead key is not transient. Hammering it would bury the one message
+    that tells you to re-consent under a rate-limit message instead."""
+    naps = []
+    log, tmp = hevy_server(lambda r: httpx.Response(401, text="nope"))
+    with pytest.raises(SystemExit, match="HEVY_API_KEY"):
+        hevy.fetch_workouts("key", tmp, sleep=naps.append)
+    assert len(log) == 1
