@@ -52,7 +52,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from . import PARTIAL_FETCH, notify
+from . import MISSING_PREFIX, PARTIAL_FETCH, notify
 from .clock import CAMPAIGN_TZ, assert_local_timezone, now
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -339,8 +339,9 @@ def run_cycle() -> int:
 
     code, tail = run_step(["build"], timeout_s=_env_int("BUILD_TIMEOUT_S", 300))
     if code != 0:
-        alert("BUILD exited {}.\n\n{}".format(
-            code, EXIT_MEANING.get(code, "Unrecognised exit code — see logs.")),
+        alert("BUILD exited {}.\n\n{}{}".format(
+            code, EXIT_MEANING.get(code, "Unrecognised exit code — see logs."),
+            shrink_details(tail) if code == 2 else ""),
             tail, key="build-{}".format(code))
         write_heartbeat(last_exit_code=code, last_stage="build",
                         finished_at=now().isoformat())
@@ -356,6 +357,19 @@ def run_cycle() -> int:
         notify.send("coach-sync: daily sync OK ({}).".format(
             finished.strftime("%a %d %b %H:%M")))
     return 0
+
+
+def shrink_details(tail: str) -> str:
+    """Which file refused, and which rows it would have lost, from build's output.
+
+    A refusal alone cannot tell a partial fetch (re-run) from a record the
+    source really deleted (--allow-shrink) — the missing rows can. These lines
+    carry row identities only, never values, so unlike the rest of the output
+    they are safe to send whether or not ALERT_INCLUDE_OUTPUT is on.
+    """
+    picked = [line.strip() for line in tail.splitlines()
+              if ": refusing to overwrite" in line or line.startswith(MISSING_PREFIX)]
+    return "\n\n" + "\n".join(picked) if picked else ""
 
 
 def alert(message: str, tail: str, key: str) -> None:

@@ -20,7 +20,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from . import campaign
+from . import MISSING_PREFIX, campaign
 from .clock import today as london_today
 
 
@@ -699,6 +699,36 @@ def _dropped_rows(old: List[dict], new: List[dict], fields) -> List[dict]:
     return [r for r in old if _row_key(r, fields) not in new_keys]
 
 
+MAX_MISSING_LISTED = 8
+
+
+def describe_loss(old: List[dict], new: List[dict], fields) -> List[str]:
+    """Name what a refused write would have lost — by row IDENTITY only.
+
+    "9 rows -> 7" says something shrank but not what, and the answer decides
+    the fix: a partial fetch (re-run) or a record the source genuinely deleted
+    (--allow-shrink). Finding out used to mean diffing raw JSON by hand.
+
+    Only the key fields are named, never the values. These lines reach
+    Telegram, a third-party custodian (ARCHITECTURE.md section 7): "2026-09-25
+    02:42 CARDIO_WORKOUT" is enough to go and look; a weight is not needed.
+    """
+    lines = [" ".join(_row_key(r, fields)) for r in _dropped_rows(old, new, fields)]
+    new_by_key = {_row_key(r, fields): r for r in new}
+    for row in old:
+        survivor = new_by_key.get(_row_key(row, fields))
+        if survivor is None:
+            continue
+        lost = _substance([row])[1] - _substance([survivor])[1]
+        if lost > 0:
+            lines.append("{} ({} value(s) emptied)".format(
+                " ".join(_row_key(row, fields)), lost))
+    if len(lines) > MAX_MISSING_LISTED:
+        extra = len(lines) - MAX_MISSING_LISTED
+        lines = lines[:MAX_MISSING_LISTED] + ["... and {} more".format(extra)]
+    return [MISSING_PREFIX + line for line in lines]
+
+
 def staleness_days(weekly: List[dict], today: Optional[date] = None) -> Optional[int]:
     """How old the newest record is, or None if nothing is dated.
 
@@ -764,14 +794,18 @@ def write_csv(path: Path, columns: List[str], rows: List[dict],
         kept = [r for r in old if id(r) not in forgiven_ids]
         base_rows, base_cells = _substance(kept)
         if not forgiven or new_rows < base_rows or new_cells < base_cells:
+            # Describe against `kept`, so a forgiven row is not reported as lost.
+            missing = describe_loss(kept, rows, key_fields or columns[:1])
             raise ShrinkGuard(
                 "{}: refusing to overwrite — the new data has less in it.\n"
                 "  existing: {} rows, {} populated cells\n"
                 "  new:      {} rows, {} populated cells\n"
+                "{}"
                 "A fetch probably failed partially and `build` ran against incomplete "
                 "raw data. The existing file is untouched.\n"
                 "Re-run `fetch`. If the loss is genuine, pass --allow-shrink."
-                .format(path.name, old_rows, old_cells, new_rows, new_cells)
+                .format(path.name, old_rows, old_cells, new_rows, new_cells,
+                        "".join(line + "\n" for line in missing))
             )
         note = "{}: {} row(s) shrank for a known reason (superseded), allowed".format(
             path.name, len(forgiven))

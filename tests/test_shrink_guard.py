@@ -186,3 +186,70 @@ def test_a_refused_write_leaves_no_temp_file_behind(csv_path, tmp_path):
     with pytest.raises(transform.ShrinkGuard):
         write(csv_path, [])
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+# ------------------------------------- a refusal names what it would lose
+#
+# 26 Sep 2026: a watch recording left running for 40 h made Google Health drop
+# two auto-detected sessions it overlapped. The alert said "9 rows -> 7" and
+# nothing more; finding WHICH two meant diffing raw JSON by hand. Whether the
+# fix is "re-run fetch" or "--allow-shrink" depends entirely on that answer.
+
+def refusal(csv_path, rows, **kw):
+    with pytest.raises(transform.ShrinkGuard) as exc:
+        write(csv_path, rows, **kw)
+    return str(exc.value)
+
+
+def test_a_refusal_names_the_rows_that_went_missing(csv_path):
+    write(csv_path, [session("2026-09-13", "14:35", "RUNNING"),
+                     session("2026-09-25", "02:42", "CARDIO_WORKOUT"),
+                     session("2026-09-25", "10:22", "CARDIO_WORKOUT")])
+    message = refusal(csv_path, [session("2026-09-13", "14:35", "RUNNING")],
+                      key_fields=KEY)
+    assert "missing: 2026-09-25 02:42 CARDIO_WORKOUT" in message
+    assert "missing: 2026-09-25 10:22 CARDIO_WORKOUT" in message
+    assert "2026-09-13" not in message        # the survivor is not listed
+
+
+def test_a_refusal_names_rows_by_key_and_never_by_value(csv_path):
+    """These lines go to Telegram. Identity is enough to go and look; the
+    values (a weight, a heart rate) stay on the box."""
+    write(csv_path, [session("2026-09-01", "19:19", "TENNIS", activity="PRIVATE")])
+    message = refusal(csv_path, [], key_fields=KEY)
+    assert "missing: 2026-09-01 19:19 TENNIS" in message
+    assert "PRIVATE" not in message
+
+
+def test_a_refusal_names_a_row_that_survived_but_lost_values(csv_path):
+    write(csv_path, [session("2026-09-01", "19:19", "TENNIS", slot="B")])
+    message = refusal(csv_path, [session("2026-09-01", "19:19", "TENNIS", slot="")],
+                      key_fields=KEY)
+    assert "missing: 2026-09-01 19:19 TENNIS (1 value(s) emptied)" in message
+
+
+def test_a_forgiven_row_is_not_reported_as_missing(csv_path):
+    """Only the unexplained loss is news; listing the superseded gym row
+    would send him looking for a problem that is not there."""
+    write(csv_path, [session("2026-09-02", "18:00", "RUNNING"),
+                     session("2026-09-04", "15:11", "STRENGTH_TRAINING")])
+    message = refusal(csv_path, [], key_fields=KEY,
+                      loss_is_expected=superseded_on({"2026-09-04"}))
+    assert "missing: 2026-09-02 18:00 RUNNING" in message
+    assert "STRENGTH_TRAINING" not in message
+
+
+def test_without_key_fields_the_first_column_names_the_row(csv_path):
+    """metrics_daily / metrics_weekly pass no key: one row per date or week."""
+    write(csv_path, [session("2026-09-01", "19:19", "TENNIS")])
+    assert "missing: 2026-09-01\n" in refusal(csv_path, [])
+
+
+def test_a_mass_loss_is_summarised_rather_than_listed_in_full(csv_path):
+    """An empty fetch can drop dozens of rows; a phone alert should not."""
+    rows = [session("2026-09-{:02d}".format(d), "08:00", "RUNNING")
+            for d in range(1, 21)]
+    write(csv_path, rows)
+    message = refusal(csv_path, [], key_fields=KEY)
+    assert message.count("missing: 2026-09") == transform.MAX_MISSING_LISTED
+    assert "... and 12 more" in message

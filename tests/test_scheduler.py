@@ -381,3 +381,52 @@ def test_a_total_fetch_failure_still_aborts_before_build(monkeypatch, tmp_path):
     assert "build" not in steps
     assert alerts == ["fetch-failed"]
     assert code == 1
+
+
+# ------------------------------------- a refusal alert names the lost rows
+
+def test_shrink_details_carries_the_file_and_the_missing_rows_only():
+    """Everything else in build's output (weights, targets) stays out."""
+    from coach_sync import MISSING_PREFIX
+    tail = "\n".join([
+        "    weight 7d mean : 83.43 kg  (target 83.6, delta -0.17)",
+        "!! REFUSED TO WRITE",
+        "sessions.csv: refusing to overwrite — the new data has less in it.",
+        "  existing: 9 rows, 94 populated cells",
+        MISSING_PREFIX + "2026-09-25 02:42 CARDIO_WORKOUT",
+    ])
+    details = scheduler.shrink_details(tail)
+    assert "sessions.csv: refusing to overwrite" in details
+    assert "missing: 2026-09-25 02:42 CARDIO_WORKOUT" in details
+    assert "83.43" not in details and "94 populated" not in details
+
+
+def test_shrink_details_reads_what_the_guard_actually_prints(tmp_path):
+    """The contract, end to end: the guard's real message, printed the way
+    `build` prints it, must be what the scheduler picks up. A reworded
+    message would otherwise silently drop the rows from every alert."""
+    from coach_sync import transform
+    path = tmp_path / "sessions.csv"
+    cols = ["date", "start_time", "exercise_type"]
+    row = {"date": "2026-09-25", "start_time": "02:42",
+           "exercise_type": "CARDIO_WORKOUT"}
+    transform.write_csv(path, cols, [row])
+    with pytest.raises(transform.ShrinkGuard) as exc:
+        transform.write_csv(path, cols, [], key_fields=tuple(cols))
+    details = scheduler.shrink_details("\n!! REFUSED TO WRITE\n{}".format(exc.value))
+    assert "sessions.csv: refusing to overwrite" in details
+    assert "missing: 2026-09-25 02:42 CARDIO_WORKOUT" in details
+
+
+def test_a_build_refusal_alert_includes_the_missing_rows(monkeypatch):
+    from coach_sync import MISSING_PREFIX
+    messages = []
+    tail = "sessions.csv: refusing to overwrite\n{}2026-09-25 02:42 CARDIO_WORKOUT".format(
+        MISSING_PREFIX)
+    monkeypatch.setattr(scheduler, "run_step",
+                        lambda args, timeout_s: (0, "") if args[0] == "fetch" else (2, tail))
+    monkeypatch.setattr(scheduler, "alert",
+                        lambda message, tail, key: messages.append(message))
+    monkeypatch.setattr(scheduler, "write_heartbeat", lambda **kw: None)
+    assert scheduler.run_cycle() == 2
+    assert "missing: 2026-09-25 02:42 CARDIO_WORKOUT" in messages[0]

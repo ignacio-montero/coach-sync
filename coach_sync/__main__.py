@@ -182,6 +182,8 @@ def cmd_build(args):
              "exercise", "set_index", "set_type", "weight_kg", "reps", "rpe",
              "is_top_set", "est_1rm_epley"],
             lifts, allow_shrink,
+            # Many sets per date, so the date alone cannot name a lost row.
+            key_fields=("date", "start_time", "exercise", "set_index"),
         )
         note = transform.write_csv(
             OUT_DIR / "sessions.csv",

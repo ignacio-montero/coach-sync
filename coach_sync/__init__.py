@@ -1,5 +1,5 @@
 """coach-sync — data pipeline for the Marta Ibanez coaching campaign."""
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 
 # Exit codes are a CONTRACT between the CLI (which emits them) and the
 # scheduler (which turns them into Telegram alerts), so they live here rather
@@ -10,3 +10,7 @@ __version__ = "0.3.2"
 # lift log for a missing weight trend, and weight is what the campaign is
 # scored on.
 PARTIAL_FETCH = 5
+
+# Same kind of contract: `build` prints one line per row a refused write would
+# have lost, and the scheduler copies exactly those lines into the alert.
+MISSING_PREFIX = "  missing: "
