@@ -1,5 +1,5 @@
 """coach-sync — data pipeline for the Marta Ibanez coaching campaign."""
-__version__ = "0.3.3"
+__version__ = "0.3.4"
 
 # Exit codes are a CONTRACT between the CLI (which emits them) and the
 # scheduler (which turns them into Telegram alerts), so they live here rather

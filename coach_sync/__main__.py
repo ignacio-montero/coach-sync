@@ -89,8 +89,10 @@ def cmd_build(args):
             problems.append("{}: no raw file".format(name))
             continue
         points = json.loads(path.read_text())
-        values, unparsed = transform.parse_scalar(name, points)
+        values, settled, unparsed = transform.parse_weighins(name, points)
         parsed[name] = values
+        if name == "weight":
+            parsed["weight_settled"] = settled
         print("  {:32s} {:4d} parsed, {} unparsed".format(name, len(values), unparsed))
         if unparsed and not values:
             problems.append(

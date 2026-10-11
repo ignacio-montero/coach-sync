@@ -202,12 +202,65 @@ def local_datetime(interval_or_sample: dict, key: str = "startTime") -> Optional
 # measurement. ARCHITECTURE.md section 6: "the first reading after 04:00".
 MORNING_CUTOFF_HOUR = 4
 
+# Readings this close together are ONE weigh-in: stepping on, off and on again.
+# The observed bursts span 10-95 s; anything a few minutes apart is a new event.
+WEIGHIN_SESSION_GAP = timedelta(minutes=5)
+
+# How far after the day's first morning reading a settled burst may start and
+# still be preferred over it. A lone reading followed an hour later by a burst
+# is the same morning re-measured; a burst after dinner is not the morning at
+# all, and preferring it would add a meal to the trend line.
+SETTLED_PREFERENCE_WINDOW = timedelta(hours=3)
+
+
+def weighin_sessions(timed: List[Tuple[datetime, float]]) -> List[list]:
+    """Chronological readings -> bursts, split wherever the gap exceeds
+    WEIGHIN_SESSION_GAP."""
+    sessions: List[list] = []
+    for moment, value in timed:
+        if sessions and moment - sessions[-1][-1][0] <= WEIGHIN_SESSION_GAP:
+            sessions[-1].append((moment, value))
+        else:
+            sessions.append([(moment, value)])
+    return sessions
+
+
+def pick_reading(timed: List[Tuple[datetime, float]]) -> Tuple[float, bool]:
+    """-> (value, settled). `timed` must be sorted.
+
+    THE FIRST STEP-ON READS HIGH. Stepped on two or three times within a
+    minute, the scale's first reading is consistently ~1 kg above the ones that
+    follow, and the later ones agree with each other. So a burst's value is its
+    LAST reading — the settled one, and the one the VeSync app itself keeps.
+
+    A day with a burst prefers it over a lone reading, provided it starts within
+    SETTLED_PREFERENCE_WINDOW of the morning's first reading. A lone reading is
+    a first step-on by definition, so `settled` is False for it: it may carry
+    that bias, and nothing here can tell.
+    """
+    morning = [(m, v) for m, v in timed if m.hour >= MORNING_CUTOFF_HOUR] or timed
+    sessions = weighin_sessions(morning)
+    opens = sessions[0][0][0]
+    settled = [s for s in sessions
+               if len(s) >= 2 and s[0][0] - opens <= SETTLED_PREFERENCE_WINDOW]
+    chosen = settled[0] if settled else sessions[0]
+    return chosen[-1][1], len(chosen) >= 2
+
 
 def parse_scalar(name: str, points: List[dict]) -> Tuple[Dict[date, float], int]:
-    """-> ({date: value}, unparsed_count).
+    """-> ({date: value}, unparsed_count). See parse_weighins."""
+    values, _, unparsed = parse_weighins(name, points)
+    return values, unparsed
 
-    SAME-DAY SELECTION: when a day has several readings, keep the EARLIEST one
-    at or after 04:00 local. Applied identically to weight and body fat.
+
+def parse_weighins(name: str, points: List[dict]
+                   ) -> Tuple[Dict[date, float], set, int]:
+    """-> ({date: value}, {dates whose value is a settled reading}, unparsed).
+
+    SAME-DAY SELECTION: pick_reading, applied identically to weight and body
+    fat. Both are written by the same step-on with the same timestamp, so the
+    same rule lands on the same reading and lean mass is computed from ONE
+    measurement, never from two.
 
     This must not depend on the order the API returns records in. It previously
     did — the rule was "first encountered wins", and the live API returns
@@ -263,16 +316,18 @@ def parse_scalar(name: str, points: List[dict]) -> Tuple[Dict[date, float], int]
         candidates.setdefault(day, []).append((moment, value))
 
     out: Dict[date, float] = {}
+    settled_days = set()
     for day, readings in candidates.items():
         timed = [(m, v) for m, v in readings if m is not None]
         if not timed:
             out[day] = readings[0][1]
             continue
         timed.sort(key=lambda pair: pair[0])
-        morning = [(m, v) for m, v in timed if m.hour >= MORNING_CUTOFF_HOUR]
-        out[day] = (morning or timed)[0][1]
+        out[day], settled = pick_reading(timed)
+        if settled:
+            settled_days.add(day)
 
-    return out, unparsed
+    return out, settled_days, unparsed
 
 
 # Below this, a sleep record is a nap or a fragment, not the night.
@@ -463,6 +518,7 @@ def window(mapping: dict, start: date, end: date) -> dict:
 DAILY_COLUMNS = [
     "date", "weight_kg", "body_fat_pct", "lean_kg", "resting_hr",
     "hrv_rmssd", "sleep_hours", "sleep_bedtime", "nap_hours", "campaign_week",
+    "weight_settled",
 ]
 
 WEEKLY_COLUMNS = [
@@ -473,7 +529,7 @@ WEEKLY_COLUMNS = [
     "sleep_7d_mean_h", "weighins_count", "sessions_done", "losing_too_fast",
     "waist_navel_cm", "waist_delta_cm", "a1_done", "a2_done",
     "weeks_since_previous", "weekly_rate_kg", "week_is_thin",
-    "data_through", "built_at",
+    "data_through", "built_at", "weighins_settled",
 ]
 
 
@@ -489,6 +545,7 @@ def build_daily(parsed: Dict[str, Any]) -> List[dict]:
                 "daily_heart_rate_variability", "sleep"):
         all_days.update(parsed.get(key, {}).keys())
 
+    settled = parsed.get("weight_settled", set())
     rows = []
     for day in sorted(all_days):
         weight = parsed.get("weight", {}).get(day)
@@ -510,6 +567,9 @@ def build_daily(parsed: Dict[str, Any]) -> List[dict]:
             "sleep_bedtime": sleep.get("sleep_bedtime", "") or "",
             "nap_hours": sleep.get("nap_hours", "") or "",
             "campaign_week": campaign.week_number(day) or "",
+            # True = the settled reading of a step-on burst; False = a lone
+            # reading, which may carry the first-step bias (pick_reading).
+            "weight_settled": (day in settled) if weight is not None else "",
         })
     return rows
 
@@ -558,6 +618,15 @@ def build_weekly(daily: List[dict], sessions: List[dict],
             baseline_waist = value
             break
 
+    # THE BASIS BREAK. Settled readings exist only from the first day a burst
+    # was recorded; every day before has one lone, first-step reading, ~1 kg
+    # high. A week-on-week comparison that spans that day compares two
+    # different measurements and shows a loss nobody made — big enough to fire
+    # losing_too_fast on its own. Those comparisons are UNKNOWN, not computed.
+    settled_dates = [r["date"] for r in daily
+                     if str(r.get("weight_settled")) == "True"]
+    basis_break = date.fromisoformat(min(settled_dates)) if settled_dates else None
+
     weekly, previous_weight, previous_week = [], None, None
     for week in sorted(by_week):
         rows = by_week[week]
@@ -584,6 +653,9 @@ def build_weekly(daily: List[dict], sessions: List[dict],
             round(weight_mean - previous_weight, 2)
             if (weight_mean and previous_weight) else None
         )
+        if (basis_break is not None and previous_week is not None
+                and campaign.week_bounds(previous_week)[0] < basis_break <= end):
+            delta_prev = None
         rate_per_week = (
             round(delta_prev / gap, 3)
             if (delta_prev is not None and gap) else None
@@ -638,6 +710,8 @@ def build_weekly(daily: List[dict], sessions: List[dict],
             # A "7-day mean" over two readings is not a 7-day mean. Surfacing the
             # count keeps a thin week visible instead of silently confident.
             "weighins_count": n_weighins,
+            "weighins_settled": sum(1 for r in rows
+                                    if str(r.get("weight_settled")) == "True"),
             "week_is_thin": thin,
             "sessions_done": sessions_by_week.get(week, 0),
             "weekly_rate_kg": rate_per_week if rate_per_week is not None else "",
