@@ -275,11 +275,11 @@ def test_build_weekly_emits_every_column_the_writer_expects_except_the_two_cli_a
     So a column that build_weekly forgets is INVISIBLE in the output — it just
     looks like a week with no data. Pin the contract explicitly.
 
-    a1_done / a2_done are deliberately excluded: they are attached later, by
+    a1_done / a2_done / a3_done are deliberately excluded: they are attached later, by
     __main__.annotate_anchors, because they need the Hevy workout list.
     """
     produced = set(week([weighed(1, 0, 84.0)]))
-    expected = set(transform.WEEKLY_COLUMNS) - {"a1_done", "a2_done"}
+    expected = set(transform.WEEKLY_COLUMNS) - {"a1_done", "a2_done", "a3_done"}
     assert expected <= produced, expected - produced
 
 

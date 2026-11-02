@@ -212,12 +212,68 @@ def test_anchor_slots_number_gym_sessions_in_order_within_each_campaign_week():
     assert labels == {"a": "A1", "b": "A2", "c": "A1"}
 
 
-def test_a_third_gym_session_in_a_week_is_labelled_a3_not_silently_dropped():
-    """The plan caps gym at two. A third is an adherence SIGNAL (over-reaching),
-    so it must stay visible rather than be clipped to A2."""
+def test_a_third_untitled_gym_session_in_a_week_is_labelled_a3():
+    """Order fallback: with no titles, the third session of the week is A3
+    (since D-060 a planned slot, before that an over-reach signal)."""
     sessions = [{"date": day_in_week(1, i).isoformat(), "start_time": "17:30",
                  "workout_id": str(i), "title": ""} for i in (0, 2, 4)]
     assert hevy.label_anchor_slots(sessions)["4"] == "A3"
+
+
+def gym(week, day, wid, title=""):
+    return {"date": day_in_week(week, day).isoformat(), "start_time": "17:30",
+            "workout_id": wid, "title": title}
+
+
+def test_a_titled_week_out_of_order_keeps_its_titles():
+    """D-060: gym any day, so A2 on Monday and A1 on Wednesday is a normal week.
+    Order would swap them; the title is the athlete's declaration and wins."""
+    labels = hevy.label_anchor_slots(
+        [gym(1, 0, "x", "A2"), gym(1, 2, "y", "A1"), gym(1, 4, "z", "A3")])
+    assert labels == {"x": "A2", "y": "A1", "z": "A3"}
+
+
+def test_titles_match_case_insensitively_and_ignore_whitespace():
+    labels = hevy.label_anchor_slots([gym(1, 0, "x", " a3 "), gym(1, 2, "y", "a1")])
+    assert labels == {"x": "A3", "y": "A1"}
+
+
+def test_near_miss_titles_fall_back_to_order_not_a_guess():
+    """Real titles from W2/W3. "Hinge-led" is probably A2, but a fuzzy match
+    that guesses wrong corrupts the anchor flags silently."""
+    labels = hevy.label_anchor_slots([
+        gym(1, 0, "x", "Hinge-led"), gym(1, 1, "y", "Upper + quad"),
+        gym(1, 2, "z", "Afternoon workout 💪"), gym(1, 3, "w", "A1 squat"),
+    ])
+    assert labels == {"x": "A1", "y": "A2", "z": "A3", "w": "A4"}
+
+
+def test_untitled_sessions_take_the_lowest_slot_the_titled_ones_left_free():
+    """A titled A1 later in the week must not leave an earlier untitled
+    session ALSO labelled A1 — that would read as A1 done twice, A2 missed."""
+    labels = hevy.label_anchor_slots(
+        [gym(1, 0, "u", ""), gym(1, 2, "t", "A1"), gym(1, 4, "v", "")])
+    assert labels == {"t": "A1", "u": "A2", "v": "A3"}
+
+
+def test_duplicate_titles_are_both_kept_not_reassigned():
+    """Two A1s is what he did: he repeated A1 and missed A2. Reassigning one to
+    A2 would mark a hinge session done that never happened."""
+    labels = hevy.label_anchor_slots(
+        [gym(1, 0, "x", "A1"), gym(1, 3, "y", "A1"), gym(1, 5, "z", "")])
+    assert labels == {"x": "A1", "y": "A1", "z": "A2"}
+
+
+def test_a_fourth_session_stays_visible_as_a4():
+    """Past the plan's three, an over-reach signal — never clipped onto A3."""
+    labels = hevy.label_anchor_slots(
+        [gym(1, d, str(d), t) for d, t in ((0, "A1"), (2, "A2"), (4, "A3"), (6, ""))])
+    assert labels["6"] == "A4"
+
+
+def test_titles_are_resolved_per_week_not_across_the_campaign():
+    labels = hevy.label_anchor_slots([gym(1, 0, "x", "A1"), gym(2, 0, "y", "")])
+    assert labels == {"x": "A1", "y": "A1"}
 
 
 def test_gym_sessions_outside_the_campaign_window_get_no_slot():

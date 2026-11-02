@@ -530,6 +530,9 @@ WEEKLY_COLUMNS = [
     "waist_navel_cm", "waist_delta_cm", "a1_done", "a2_done",
     "weeks_since_previous", "weekly_rate_kg", "week_is_thin",
     "data_through", "built_at", "weighins_settled",
+    # Appended, never inserted: coach-view tolerates extra columns but
+    # readers that index by position would not tolerate a shifted one.
+    "a3_done",
 ]
 
 

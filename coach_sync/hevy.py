@@ -221,13 +221,25 @@ def gym_sessions(rows: List[dict]) -> List[dict]:
     return sorted(seen.values(), key=lambda r: (r["date"], r["start_time"]))
 
 
-def label_anchor_slots(sessions: List[dict]) -> Dict[str, str]:
-    """-> {workout_id: 'A1'|'A2'|'A3'} by order within each campaign week.
+ANCHOR_TITLES = ("A1", "A2", "A3")
 
-    The plan caps gym at two sessions a week (A1 squat-led, A2 hinge-led). Which
-    weekday they land on shifts, because the gym follows the office rather than
-    the calendar — so ORDER within the week is the reliable signal, not weekday.
-    Inferred, and user-correctable.
+
+def label_anchor_slots(sessions: List[dict]) -> Dict[str, str]:
+    """-> {workout_id: 'A1'|'A2'|'A3'|...} within each campaign week.
+
+    Since D-060 there are three gym sessions a week, on any day, and the order
+    they land in is no longer a reliable signal (A2 before A1 is a normal week).
+    So the athlete's own declaration wins: a workout titled exactly A1, A2 or A3
+    (case-insensitive, trimmed) is that slot. Anything else — "Afternoon
+    workout", "Hinge-led", no title — falls back to ORDER, taking the lowest
+    slot the titled sessions have not already claimed that week.
+
+    Exact match only. "Hinge-led" is probably A2, but a fuzzy guess that is
+    wrong silently corrupts the anchor flags; an order fallback is at least a
+    known, documented approximation.
+
+    Two workouts titled A1 in one week are BOTH A1 — he repeated A1 and missed
+    A2, and that is what a2_done should say. The title is not second-guessed.
     """
     from . import campaign
 
@@ -239,6 +251,20 @@ def label_anchor_slots(sessions: List[dict]) -> Dict[str, str]:
 
     labels: Dict[str, str] = {}
     for week_sessions in by_week.values():
-        for i, session in enumerate(week_sessions):
-            labels[session["workout_id"]] = "A{}".format(i + 1)
+        untitled = []
+        for session in week_sessions:
+            title = (session.get("title") or "").strip().upper()
+            if title in ANCHOR_TITLES:
+                labels[session["workout_id"]] = title
+            else:
+                untitled.append(session)
+
+        claimed = {labels[s["workout_id"]] for s in week_sessions
+                   if s["workout_id"] in labels}
+        # A4, A5... past the plan's three stay visible as an over-reach signal
+        # rather than being clipped onto a real slot.
+        free = ("A{}".format(n) for n in range(1, len(week_sessions) + 2)
+                if "A{}".format(n) not in claimed)
+        for session in untitled:
+            labels[session["workout_id"]] = next(free)
     return labels

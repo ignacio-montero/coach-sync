@@ -63,6 +63,53 @@ def test_one_gym_session_gives_a1_but_not_a2():
     assert weekly[0]["a1_done"] is True and weekly[0]["a2_done"] is False
 
 
+def _flags(row):
+    return row["a1_done"], row["a2_done"], row["a3_done"]
+
+
+def _gym(day, wid, title=""):
+    return {"date": day_in_week(1, day).isoformat(), "start_time": "17:30",
+            "workout_id": wid, "title": title}
+
+
+def test_an_a1_plus_a3_week_does_not_call_a2_done():
+    """The bug D-060 fixed: two sessions, so the old ">= 2" count said A2 was
+    done. A2 is the hinge anchor; reading it as done hides a missed one."""
+    weekly = transform.build_weekly([weighed(1, 0, 84.0)], [])
+    annotate_anchors(weekly, [_gym(0, "a", "A1"), _gym(3, "c", "A3")])
+    assert _flags(weekly[0]) == (True, False, True)
+
+
+def test_a2_alone_is_a2_done_not_a1_done():
+    weekly = transform.build_weekly([weighed(1, 0, 84.0)], [])
+    annotate_anchors(weekly, [_gym(2, "b", "A2")])
+    assert _flags(weekly[0]) == (False, True, False)
+
+
+def test_a_repeated_a1_does_not_satisfy_a2():
+    weekly = transform.build_weekly([weighed(1, 0, 84.0)], [])
+    annotate_anchors(weekly, [_gym(0, "a", "A1"), _gym(3, "b", "A1")])
+    assert _flags(weekly[0]) == (True, False, False)
+
+
+def test_untitled_weeks_keep_the_old_order_based_flags():
+    """Back-compat: every pre-D-060 untitled week must read exactly as before."""
+    weekly = transform.build_weekly([weighed(1, 0, 84.0)], [])
+    annotate_anchors(weekly, [_gym(0, "a"), _gym(3, "b")])
+    assert _flags(weekly[0]) == (True, True, False)
+
+
+def test_the_flags_and_the_lifts_slot_column_come_from_one_labelling():
+    """__main__ passes the SAME labels to lifts.csv and to annotate_anchors, so
+    the CSV can never say slot=A3 while a3_done says False."""
+    sessions = [_gym(0, "a", "A3"), _gym(2, "b", "")]
+    slots = hevy.label_anchor_slots(sessions)
+    weekly = transform.build_weekly([weighed(1, 0, 84.0)], [])
+    annotate_anchors(weekly, sessions, slots)
+    assert slots == {"a": "A3", "b": "A1"}
+    assert _flags(weekly[0]) == (True, False, True)
+
+
 def test_hevy_workouts_re_enter_the_session_count_after_watch_dedup():
     """__main__ strips watch STRENGTH_TRAINING records on days Hevy also logged,
     then adds the Hevy workouts back. Drop either half and sessions_done is
@@ -90,6 +137,9 @@ def test_the_weekly_csv_round_trips_through_the_writer(tmp_path):
     # coaching assistant reads. Pin it — "True"/"False", not "1"/"0".
     assert rows[0]["lean_floor_breach"] in ("True", "False")
     assert rows[0]["a1_done"] == "False"
+    # a3_done is APPENDED (D-060) so no existing column changes position.
+    assert transform.WEEKLY_COLUMNS[-1] == "a3_done"
+    assert rows[0]["a3_done"] == "False"
 
 
 def test_no_weekly_column_is_silently_dropped_by_the_writer(tmp_path):

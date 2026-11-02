@@ -130,7 +130,7 @@ def cmd_build(args):
             print("   - {}".format(problem))
         print("   Run `python -m coach_sync inspect` and pin the parser.")
 
-    lifts, gym = [], []
+    lifts, gym, slots = [], [], {}
     gym_days: set = set()
     hevy_path = latest_raw(RAW_DIR, "hevy_workouts")
     if hevy_path:
@@ -170,7 +170,7 @@ def cmd_build(args):
 
     daily = transform.build_daily(parsed)
     weekly = transform.build_weekly(daily, sessions + gym_as_sessions(gym), manual)
-    annotate_anchors(weekly, gym)
+    annotate_anchors(weekly, gym, slots)
 
     allow_shrink = getattr(args, "allow_shrink", False)
     try:
@@ -244,8 +244,9 @@ def cmd_build(args):
         print("    lean 7d mean   : {} kg   floor breach: {}".format(
             row["lean_7d_mean"], row["lean_floor_breach"]))
         print("    weigh-ins      : {} of 7".format(row["weighins_count"]))
-        print("    sessions       : {}  (A1={} A2={})".format(
-            row["sessions_done"], row.get("a1_done"), row.get("a2_done")))
+        print("    sessions       : {}  (A1={} A2={} A3={})".format(
+            row["sessions_done"], row.get("a1_done"), row.get("a2_done"),
+            row.get("a3_done")))
         if row["waist_navel_cm"]:
             print("    waist (navel)  : {} cm  (vs baseline {})".format(
                 row["waist_navel_cm"], row["waist_delta_cm"]))
@@ -275,18 +276,25 @@ def gym_as_sessions(gym):
             for g in gym]
 
 
-def annotate_anchors(weekly, gym):
-    """a1_done / a2_done - the two sessions the plan protects above all else."""
+def annotate_anchors(weekly, gym, slots=None):
+    """a1_done / a2_done / a3_done - read from the slot LABELS, not the count.
+
+    A count stopped being honest at three sessions a week (D-060): A1 + A3
+    is two sessions, and ">= 2" would call A2 done. Still occurrence, not
+    content (D-052): a workout titled A2 that skipped the hinge still counts.
+    """
     from collections import defaultdict
-    by_week = defaultdict(list)
+    if slots is None:
+        slots = hevy.label_anchor_slots(gym)
+    done = defaultdict(set)
     for session in gym:
         week = campaign.week_number(date.fromisoformat(session["date"]))
         if week:
-            by_week[week].append(session)
+            done[week].add(slots.get(session["workout_id"], ""))
     for row in weekly:
         week = int(row["week"][1:])
-        row["a1_done"] = len(by_week.get(week, [])) >= 1
-        row["a2_done"] = len(by_week.get(week, [])) >= 2
+        for slot in ("A1", "A2", "A3"):
+            row["{}_done".format(slot.lower())] = slot in done.get(week, set())
 
 
 def main(argv=None):
